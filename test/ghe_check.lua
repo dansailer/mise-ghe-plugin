@@ -1,0 +1,168 @@
+-- Optional offline checks for lib/ghe.lua. No network.
+--   lua test/ghe_check.lua
+
+local script = arg and arg[0] or "./test/ghe_check.lua"
+local dir = script:match("^(.*)[/\\]") or "."
+package.path = dir .. "/../lib/?.lua;" .. package.path
+
+RUNTIME = { osType = "linux", archType = "amd64" }
+
+local ghe = require("ghe")
+
+local function assert_eq(got, expected, msg)
+    if got ~= expected then
+        error((msg or "assert_eq") .. ": expected " .. tostring(expected) .. ", got " .. tostring(got), 2)
+    end
+end
+
+local function assert_err(fn, needle, msg)
+    local ok, err = pcall(fn)
+    if ok then
+        error((msg or "assert_err") .. ": expected error containing " .. needle, 2)
+    end
+    if tostring(err):find(needle, 1, true) == nil then
+        error((msg or "assert_err") .. ": expected '" .. needle .. "' in " .. tostring(err), 2)
+    end
+end
+
+assert_eq(ghe.normalize_tag("v1.2.3"), "1.2.3", "strip v")
+assert_eq(ghe.normalize_tag("1.2.3-rc.1"), "1.2.3-rc.1", "keep prerelease")
+assert_eq(ghe.normalize_tag("release-1.2"), "release-1.2", "keep other prefix")
+
+local owner, repo = ghe.parse_tool("org/repo")
+assert_eq(owner, "org", "parse owner")
+assert_eq(repo, "repo", "parse repo")
+owner, repo = ghe.parse_tool("org/repo/unused")
+assert_eq(owner, "org", "parse extra owner")
+assert_eq(repo, "repo", "parse extra repo")
+assert_err(function()
+    ghe.parse_tool("org")
+end, "owner/repo", "missing slash")
+
+assert_eq(ghe.api_url({ api_url = "https://ghe.example/api/v3/" }), "https://ghe.example/api/v3", "strip slash")
+assert_eq(ghe.host_from_api_url("https://github.mycompany.com/api/v3"), "github.mycompany.com", "host")
+assert_eq(ghe.host_from_api_url("https://user:pass@github.mycompany.com:443/api/v3"), "github.mycompany.com", "strip userinfo/port")
+local gh_hosts = ghe.gh_hosts_for_api_url("https://api.company.ghe.com/api/v3")
+assert_eq(gh_hosts[1], "api.company.ghe.com", "api host first")
+assert_eq(gh_hosts[2], "company.ghe.com", "strip api. prefix")
+gh_hosts = ghe.gh_hosts_for_api_url("https://github.mycompany.com/api/v3")
+assert_eq(#gh_hosts, 1, "no extra host")
+assert_eq(gh_hosts[1], "github.mycompany.com", "ghe host")
+
+local prev_cmd = package.loaded.cmd
+package.loaded.cmd = {
+    exec = function()
+        error("gh should not run when token option is set")
+    end,
+}
+assert_eq(ghe.token({ token = "  abc  " }, "https://ghe.example/api/v3"), "abc", "trim token")
+package.loaded.cmd = prev_cmd
+
+local gh_calls = {}
+package.loaded.cmd = {
+    exec = function(command, opts)
+        if command ~= "gh auth token" then
+            error("unexpected command: " .. tostring(command))
+        end
+        if command:find("ghe.example", 1, true) then
+            error("host must not be interpolated into the command")
+        end
+        table.insert(gh_calls, opts.env.GH_HOST)
+        if opts.env.GH_HOST == "ghe.example" then
+            return "  ghp_from_gh  \n"
+        end
+        error("no token for " .. tostring(opts.env.GH_HOST))
+    end,
+}
+assert_eq(ghe.token_from_gh("https://ghe.example/api/v3"), "ghp_from_gh", "gh auth token")
+assert_eq(gh_calls[1], "ghe.example", "GH_HOST")
+package.loaded.cmd = {
+    exec = function()
+        error("gh missing")
+    end,
+}
+assert_eq(ghe.token_from_gh("https://ghe.example/api/v3"), nil, "gh missing is nil")
+package.loaded.cmd = prev_cmd
+
+local h = ghe.headers(nil)
+assert_eq(h["User-Agent"], "mise-ghe-backend", "ua")
+assert_eq(h["Accept"], "application/vnd.github+json", "accept")
+assert_eq(h["Authorization"], nil, "no auth")
+h = ghe.headers("secret")
+assert_eq(h["Authorization"], "Bearer secret", "bearer")
+assert_eq(tostring(h["Authorization"]):find("secret", 1, true) ~= nil, true, "header has token internally")
+
+local os_aliases, arch_aliases = ghe.os_arch()
+local linux = ghe.score_asset("tool-linux-amd64.tar.gz", os_aliases, arch_aliases)
+local musl = ghe.score_asset("tool-linux-amd64-musl.tar.gz", os_aliases, arch_aliases)
+local win = ghe.score_asset("tool-windows-amd64.zip", os_aliases, arch_aliases)
+local sum = ghe.score_asset("tool-linux-amd64.tar.gz.sha256", os_aliases, arch_aliases)
+assert(linux > musl, "prefer gnu over musl")
+assert(linux > win, "prefer native OS")
+assert(linux > sum, "prefer archive over checksum")
+
+assert_eq(ghe.is_archive("a.tar.gz"), true, "tar.gz")
+assert_eq(ghe.is_archive("a.tgz"), true, "tgz")
+assert_eq(ghe.is_archive("a.zip"), true, "zip")
+assert_eq(ghe.is_archive("a"), false, "plain binary")
+
+local releases = {
+    {
+        tag_name = "v1.2.3",
+        draft = false,
+        assets = {
+            { name = "tool-linux-amd64.tar.gz", url = "https://ghe.example/api/v3/repos/org/tool/releases/assets/1" },
+            { name = "tool-windows-amd64.zip", url = "https://ghe.example/api/v3/repos/org/tool/releases/assets/2" },
+        },
+    },
+    {
+        tag_name = "v1.0.0",
+        draft = false,
+        assets = {
+            { name = "tool-linux-amd64.tar.gz", url = "https://ghe.example/api/v3/repos/org/tool/releases/assets/3" },
+        },
+    },
+    {
+        tag_name = "v9.9.9",
+        draft = true,
+        assets = {
+            { name = "tool-linux-amd64.tar.gz", url = "https://ghe.example/api/v3/repos/org/tool/releases/assets/4" },
+        },
+    },
+}
+
+local versions = ghe.versions_from_releases(releases)
+assert_eq(versions[1], "1.0.0", "oldest first")
+assert_eq(versions[2], "1.2.3", "newest last")
+assert_eq(#versions, 2, "skip draft")
+
+local rel = ghe.find_release(releases, "1.2.3")
+assert_eq(rel.tag_name, "v1.2.3", "find stripped")
+rel = ghe.find_release(releases, "v1.0.0")
+assert_eq(rel.tag_name, "v1.0.0", "find v-prefix")
+assert_err(function()
+    ghe.find_release(releases, "9.9.9")
+end, "Unknown version", "draft not found")
+assert_err(function()
+    ghe.find_release(releases, "0.0.1")
+end, "Unknown version", "missing version")
+
+local asset = ghe.pick_asset(releases[1].assets, {})
+assert_eq(asset.name, "tool-linux-amd64.tar.gz", "pick linux")
+asset = ghe.pick_asset(releases[1].assets, { asset_pattern = "windows" })
+assert_eq(asset.name, "tool-windows-amd64.zip", "pattern")
+assert_err(function()
+    ghe.pick_asset(releases[1].assets, { matching = "nope" })
+end, "Available assets", "no match lists names")
+
+assert_eq(ghe.bin_name({ bin = "custom" }, "repo"), "custom", "bin")
+assert_eq(ghe.bin_name({ rename_exe = "renamed" }, "repo"), "renamed", "rename")
+assert_eq(ghe.bin_name({}, "repo"), "repo", "default repo")
+
+if not os.getenv("MISE_GHE_API_URL") and not os.getenv("GHE_API_URL") then
+    assert_err(function()
+        ghe.api_url({})
+    end, "MISE_GHE_API_URL", "missing api_url")
+end
+
+print("ghe_check: ok")
