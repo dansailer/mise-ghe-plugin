@@ -34,13 +34,20 @@ The backend prefix is the **install name** (`ghe` in `mise plugin link ghe ...`)
 | `GHE_API_URL` | no | Fallback if `MISE_GHE_API_URL` is unset |
 | `MISE_GITHUB_ENTERPRISE_TOKEN` | for private repos | Preferred token |
 | `MISE_GHE_TOKEN` | for private repos | Next token fallback |
-| `MISE_GITHUB_TOKEN` | for private repos | Next token fallback |
-| `GITHUB_TOKEN` | for private repos | Next token fallback |
-| `GITHUB_API_TOKEN` | for private repos | Last token fallback |
+| `MISE_GITHUB_TOKEN` | for private repos | After `gh` |
+| `GITHUB_TOKEN` | for private repos | After `gh` |
+| `GITHUB_API_TOKEN` | for private repos | Last fallback after `gh` |
 
-There is no default to `api.github.com`. Trailing slashes on the API URL are stripped.
+There is no default to `api.github.com`. The API URL must be `https://` (trailing slashes are stripped; userinfo is rejected).
 
-Token resolution order: tool option `token` (discouraged), then the env vars above, then **`gh auth token`** for the API hostname. Public GHE repos work without a token.
+Token resolution order:
+
+1. Tool option `token` (discouraged — do not put tokens in `mise.toml`)
+2. `MISE_GITHUB_ENTERPRISE_TOKEN`, then `MISE_GHE_TOKEN`
+3. `gh auth token` for the API hostname
+4. `MISE_GITHUB_TOKEN`, then `GITHUB_TOKEN`, then `GITHUB_API_TOKEN`
+
+Public GHE repos work without a token. `gh` is tried **before** generic `GITHUB_TOKEN` so a github.com token in the environment does not hide a GHE `gh` login.
 
 `gh` fallback requires the GitHub CLI on `PATH` and a login for that host:
 
@@ -49,16 +56,16 @@ gh auth login --hostname github.mycompany.com
 # Contents: read is enough for private release assets
 ```
 
-The plugin runs `gh auth token` with `GH_HOST` set from `api_url` (for example `https://github.mycompany.com/api/v3` → `github.mycompany.com`). If the API host starts with `api.`, it also tries the name without that prefix (`api.company.ghe.com` → `company.ghe.com`). Env vars still win over `gh`. The token is never printed.
+The plugin runs `gh auth token` with `GH_HOST` set from `api_url` (for example `https://github.mycompany.com/api/v3` → `github.mycompany.com`). If the API host starts with `api.`, it also tries the name without that prefix (`api.company.ghe.com` → `company.ghe.com`). Prompts are disabled (`GH_PROMPT_DISABLED`). The token is never printed.
 
-For **private** release assets the token needs **Contents: read**. Assets are downloaded from the API asset URL (`Accept: application/octet-stream`), not from `browser_download_url` alone.
+For **private** release assets the token needs **Contents: read**. Downloads use the API asset URL (`asset.url`) with `Accept: application/octet-stream` and `Authorization` only when that URL is HTTPS on the same host as `api_url`. `browser_download_url` is a same-host fallback without `Authorization`.
 
 ## Tool options
 
 | Option | Purpose |
 |--------|---------|
 | `api_url` | Per-tool GHE API root (overrides env) |
-| `asset_pattern` / `matching` | Keep assets whose name contains this string or matches it as a Lua pattern, then still pick by OS/arch score |
+| `asset_pattern` / `matching` | Keep assets whose name contains this substring, then pick by OS/arch score (also allows a foreign-OS asset) |
 | `bin` / `rename_exe` | Name for a single (non-archive) binary; default is the repo name |
 | `token` | Per-tool token (prefer env vars) |
 

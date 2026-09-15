@@ -23,21 +23,19 @@ function PLUGIN:BackendInstall(ctx)
     local releases = ghe.list_releases(api_url, owner, repo, token)
     local release = ghe.find_release(releases, version)
     local asset = ghe.pick_asset(release.assets, options)
-    if type(asset.name) ~= "string" or asset.name == "" then
-        error("Selected release asset has no name")
+    local filename = ghe.safe_filename(asset.name)
+    if not filename then
+        error("Selected release asset has an unsafe name: " .. tostring(asset.name))
     end
 
     ghe.ensure_dir(install_path)
     ghe.ensure_dir(download_path)
 
-    local archive_path = file.join_path(download_path, asset.name)
-    ghe.download_asset(asset, archive_path, token)
+    local archive_path = file.join_path(download_path, filename)
+    ghe.download_asset(asset, archive_path, token, api_url)
 
-    if ghe.is_archive(asset.name) then
-        local ok = pcall(archiver.decompress, archive_path, install_path, { strip_components = 1 })
-        if not ok then
-            archiver.decompress(archive_path, install_path)
-        end
+    if ghe.is_archive(filename) then
+        archiver.decompress(archive_path, install_path, { strip_components = 1 })
     else
         local dest = file.join_path(install_path, ghe.bin_name(options, repo))
         file.move(archive_path, dest)

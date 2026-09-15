@@ -16,7 +16,7 @@ mise exec -- <binary> --version
 Expect:
 
 - `ls-remote` hits `{api_url}/repos/org/known-tool/releases` and prints versions oldest → newest, without a leading `v` when tags are `vX.Y.Z`.
-- `install` downloads the platform asset from the **API** asset URL (`asset.url`) with `Accept: application/octet-stream`.
+- `install` downloads the platform asset from the **API** asset URL (`asset.url`) with `Accept: application/octet-stream` and `Authorization` only for an HTTPS URL on the same host as `api_url`.
 - The binary is on PATH via `BackendExecEnv` (`install_path` and `install_path/bin` if that dir exists).
 
 ## Failure messages
@@ -24,6 +24,7 @@ Expect:
 | Case | Expect an explicit error mentioning |
 |------|-------------------------------------|
 | missing `api_url` | `MISE_GHE_API_URL` / `GHE_API_URL` / tool option `api_url`, plus an example `…/api/v3` |
+| HTTP `api_url` | must be HTTPS |
 | 401 / 403 | token env vars (`MISE_GITHUB_ENTERPRISE_TOKEN`, `MISE_GHE_TOKEN`, `GITHUB_TOKEN`) and/or `gh auth login --hostname` |
 | 404 repo | org/repo and `api_url` |
 | no matching asset | available asset names |

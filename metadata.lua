@@ -6,6 +6,6 @@ PLUGIN = {
     license = "MIT",
     notes = {
         "Set MISE_GHE_API_URL or tool option api_url (.../api/v3).",
-        "Auth: MISE_GITHUB_ENTERPRISE_TOKEN, then MISE_GHE_TOKEN, then GITHUB_TOKEN, then gh auth token.",
+        "Auth: MISE_GITHUB_ENTERPRISE_TOKEN, then MISE_GHE_TOKEN, then gh auth token, then GITHUB_TOKEN.",
     },
 }

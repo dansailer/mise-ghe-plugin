@@ -38,6 +38,20 @@ local function ends_with(s, suffix)
     return suffix == "" or s:sub(-#suffix) == suffix
 end
 
+local function is_https(url)
+    return type(url) == "string" and url:sub(1, 8):lower() == "https://"
+end
+
+local function is_sidecar(name)
+    local n = name:lower()
+    return ends_with(n, ".sha256")
+        or ends_with(n, ".sha256sum")
+        or ends_with(n, ".asc")
+        or ends_with(n, ".sig")
+        or ends_with(n, ".json")
+        or ends_with(n, ".sbom")
+end
+
 local function path_escape(s)
     return (s:gsub("([^%w%-%._])", function(c)
         return string.format("%%%02X", string.byte(c))
@@ -79,6 +93,14 @@ function M.api_url(options)
             "GitHub Enterprise API URL is not set. Set tool option api_url, or environment variable MISE_GHE_API_URL (or GHE_API_URL). Example: https://github.mycompany.com/api/v3"
         )
     end
+    if not is_https(url) then
+        error(
+            "GitHub Enterprise API URL must be HTTPS. Set tool option api_url, or MISE_GHE_API_URL (or GHE_API_URL). Example: https://github.mycompany.com/api/v3"
+        )
+    end
+    if url:find("@", 1, true) then
+        error("GitHub Enterprise API URL must not include userinfo (user:password@). Use a token env var instead.")
+    end
     return url
 end
 
@@ -118,11 +140,33 @@ function M.gh_hosts_for_api_url(api_url)
     return hosts
 end
 
+function M.same_http_host(url, api_url)
+    local a = M.gh_hosts_for_api_url(url)
+    local b = M.gh_hosts_for_api_url(api_url)
+    if #a == 0 or #b == 0 then
+        return false
+    end
+    local set = {}
+    for _, h in ipairs(a) do
+        set[h] = true
+    end
+    for _, h in ipairs(b) do
+        if set[h] then
+            return true
+        end
+    end
+    return false
+end
+
 local function gh_auth_token(host)
     local cmd = require("cmd")
     -- Host goes through GH_HOST so it is never interpolated into the shell string.
     local ok, output = pcall(cmd.exec, "gh auth token", {
-        env = { GH_HOST = host },
+        env = {
+            GH_HOST = host,
+            GH_PROMPT_DISABLED = "1",
+            GIT_TERMINAL_PROMPT = "0",
+        },
     })
     if not ok then
         return nil
@@ -142,15 +186,23 @@ function M.token_from_gh(api_url)
 end
 
 function M.token(options, api_url)
-    return option_string(options, "token")
+    local t = option_string(options, "token")
         or env_first({
             "MISE_GITHUB_ENTERPRISE_TOKEN",
             "MISE_GHE_TOKEN",
-            "MISE_GITHUB_TOKEN",
-            "GITHUB_TOKEN",
-            "GITHUB_API_TOKEN",
         })
-        or M.token_from_gh(api_url)
+    if t then
+        return t
+    end
+    t = M.token_from_gh(api_url)
+    if t then
+        return t
+    end
+    return env_first({
+        "MISE_GITHUB_TOKEN",
+        "GITHUB_TOKEN",
+        "GITHUB_API_TOKEN",
+    })
 end
 
 function M.parse_tool(tool)
@@ -387,28 +439,37 @@ function M.asset_name_matches(name, pattern)
     if pattern == nil or pattern == "" then
         return true
     end
-    if name:find(pattern, 1, true) then
-        return true
-    end
-    local ok, start = pcall(function()
-        return name:find(pattern)
-    end)
-    return ok and start ~= nil
+    return name:find(pattern, 1, true) ~= nil
 end
 
 function M.pick_asset(assets, options)
     options = options or {}
     local os_aliases, arch_aliases = M.os_arch()
     local pattern = option_string(options, "asset_pattern") or option_string(options, "matching")
+    local patterned = pattern ~= nil
     local names = {}
     local best, best_score = nil, nil
     for _, asset in ipairs(assets or {}) do
         local name = asset.name
         if type(name) == "string" and name ~= "" then
             table.insert(names, name)
-            if M.asset_name_matches(name, pattern) then
+            if (not is_sidecar(name)) and M.asset_name_matches(name, pattern) then
+                local lower = name:lower()
+                local os_ok = any_needle(lower, os_aliases)
+                local arch_ok = any_needle(lower, arch_aliases)
+                local foreign = foreign_os_present(lower, os_aliases)
                 local score = M.score_asset(name, os_aliases, arch_aliases)
-                if best_score == nil or score > best_score then
+                local ok = true
+                if not patterned then
+                    if foreign then
+                        ok = false
+                    elseif not os_ok and not arch_ok then
+                        ok = false
+                    elseif score <= 0 then
+                        ok = false
+                    end
+                end
+                if ok and (best_score == nil or score > best_score) then
                     best = asset
                     best_score = score
                 end
@@ -497,18 +558,47 @@ function M.is_archive(name)
         or ends_with(n, ".tar")
 end
 
-function M.download_asset(asset, dest, token)
+function M.safe_filename(name)
+    if type(name) ~= "string" then
+        return nil
+    end
+    local n = name:gsub("\\", "/")
+    local slash = n:find("/[^/]*$")
+    local base = n
+    if slash then
+        base = n:sub(slash + 1)
+    end
+    if base == "" or base == "." or base == ".." then
+        return nil
+    end
+    return base
+end
+
+function M.download_asset(asset, dest, token, api_url)
     local http = require("http")
     local file = require("file")
     local url = asset.url
-    if type(url) ~= "string" or url == "" then
+    local from_api = type(url) == "string" and url ~= ""
+    if not from_api then
         url = asset.browser_download_url
     end
     if type(url) ~= "string" or url == "" then
         error("Release asset has no download URL: " .. tostring(asset.name))
     end
-    local headers = M.headers(token)
-    headers["Accept"] = "application/octet-stream"
+    if not is_https(url) then
+        error("Download URL must be HTTPS")
+    end
+    if not M.same_http_host(url, api_url) then
+        error("Download URL host does not match api_url")
+    end
+    local headers = {
+        ["User-Agent"] = "mise-ghe-backend",
+        ["Accept"] = "application/octet-stream",
+        ["X-GitHub-Api-Version"] = "2022-11-28",
+    }
+    if token and from_api then
+        headers["Authorization"] = "Bearer " .. token
+    end
     local err = http.download_file({
         url = url,
         headers = headers,
@@ -548,7 +638,12 @@ function M.chmod_x(path)
 end
 
 function M.bin_name(options, repo)
-    return option_string(options, "bin") or option_string(options, "rename_exe") or repo
+    local name = option_string(options, "bin") or option_string(options, "rename_exe") or repo
+    local safe = M.safe_filename(name)
+    if not safe then
+        error("Invalid binary name")
+    end
+    return safe
 end
 
 return M

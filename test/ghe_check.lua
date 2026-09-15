@@ -40,8 +40,30 @@ assert_err(function()
 end, "owner/repo", "missing slash")
 
 assert_eq(ghe.api_url({ api_url = "https://ghe.example/api/v3/" }), "https://ghe.example/api/v3", "strip slash")
+assert_err(function()
+    ghe.api_url({ api_url = "http://ghe.example/api/v3" })
+end, "HTTPS", "reject http")
+assert_err(function()
+    ghe.api_url({ api_url = "https://user:pass@ghe.example/api/v3" })
+end, "userinfo", "reject userinfo")
 assert_eq(ghe.host_from_api_url("https://github.mycompany.com/api/v3"), "github.mycompany.com", "host")
 assert_eq(ghe.host_from_api_url("https://user:pass@github.mycompany.com:443/api/v3"), "github.mycompany.com", "strip userinfo/port")
+assert_eq(
+    ghe.same_http_host("https://ghe.example/api/v3/repos/o/r/releases/assets/1", "https://ghe.example/api/v3"),
+    true,
+    "same host"
+)
+assert_eq(ghe.same_http_host("https://evil.example/x", "https://ghe.example/api/v3"), false, "other host")
+assert_eq(
+    ghe.same_http_host("https://company.ghe.com/o/r/releases/download/v1/x", "https://api.company.ghe.com/api/v3"),
+    true,
+    "api. prefix overlap"
+)
+assert_eq(ghe.safe_filename("tool.tar.gz"), "tool.tar.gz", "basename plain")
+assert_eq(ghe.safe_filename("../evil"), "evil", "basename parent")
+assert_eq(ghe.safe_filename("foo/../../../tmp/x"), "x", "basename traversal")
+assert_eq(ghe.safe_filename(".."), nil, "reject ..")
+assert_eq(ghe.safe_filename("."), nil, "reject .")
 local gh_hosts = ghe.gh_hosts_for_api_url("https://api.company.ghe.com/api/v3")
 assert_eq(gh_hosts[1], "api.company.ghe.com", "api host first")
 assert_eq(gh_hosts[2], "company.ghe.com", "strip api. prefix")
@@ -67,6 +89,9 @@ package.loaded.cmd = {
         if command:find("ghe.example", 1, true) then
             error("host must not be interpolated into the command")
         end
+        if opts.env.GH_PROMPT_DISABLED ~= "1" then
+            error("GH_PROMPT_DISABLED must be set")
+        end
         table.insert(gh_calls, opts.env.GH_HOST)
         if opts.env.GH_HOST == "ghe.example" then
             return "  ghp_from_gh  \n"
@@ -76,6 +101,9 @@ package.loaded.cmd = {
 }
 assert_eq(ghe.token_from_gh("https://ghe.example/api/v3"), "ghp_from_gh", "gh auth token")
 assert_eq(gh_calls[1], "ghe.example", "GH_HOST")
+if not os.getenv("MISE_GITHUB_ENTERPRISE_TOKEN") and not os.getenv("MISE_GHE_TOKEN") then
+    assert_eq(ghe.token({}, "https://ghe.example/api/v3"), "ghp_from_gh", "gh before generic GITHUB_TOKEN")
+end
 package.loaded.cmd = {
     exec = function()
         error("gh missing")
@@ -154,10 +182,20 @@ assert_eq(asset.name, "tool-windows-amd64.zip", "pattern")
 assert_err(function()
     ghe.pick_asset(releases[1].assets, { matching = "nope" })
 end, "Available assets", "no match lists names")
+assert_err(function()
+    ghe.pick_asset({ { name = "tool-linux-amd64.tar.gz.sha256" } }, {})
+end, "Available assets", "skip checksum")
+assert_err(function()
+    ghe.pick_asset({ { name = "tool-windows-amd64.zip" } }, {})
+end, "Available assets", "skip foreign os")
 
 assert_eq(ghe.bin_name({ bin = "custom" }, "repo"), "custom", "bin")
 assert_eq(ghe.bin_name({ rename_exe = "renamed" }, "repo"), "renamed", "rename")
 assert_eq(ghe.bin_name({}, "repo"), "repo", "default repo")
+assert_eq(ghe.bin_name({ bin = "../evil" }, "repo"), "evil", "bin basename")
+assert_err(function()
+    ghe.bin_name({ bin = ".." }, "repo")
+end, "Invalid binary name", "reject .. bin")
 
 if not os.getenv("MISE_GHE_API_URL") and not os.getenv("GHE_API_URL") then
     assert_err(function()
