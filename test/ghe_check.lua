@@ -112,6 +112,51 @@ package.loaded.cmd = {
 assert_eq(ghe.token_from_gh("https://ghe.example/api/v3"), nil, "gh missing is nil")
 package.loaded.cmd = prev_cmd
 
+local prev_runtime = RUNTIME
+local prev_file = package.loaded.file
+local prev_getenv = os.getenv
+local seen_gh_env
+RUNTIME = {
+    osType = "linux",
+    archType = "amd64",
+    pluginDirPath = "/home/test/.local/share/mise/plugins/ghe",
+}
+os.getenv = function(name)
+    if name == "PATH" then
+        return "/usr/bin"
+    end
+    return nil
+end
+package.loaded.file = {
+    join_path = function(...)
+        local parts = {}
+        for i = 1, select("#", ...) do
+            parts[i] = select(i, ...)
+        end
+        return table.concat(parts, "/")
+    end,
+    exists = function(path)
+        return path == "/home/test/.config/gh/hosts.yml"
+            or path == "/home/test/.local/share/mise/shims/gh"
+    end,
+}
+package.loaded.cmd = {
+    exec = function(command, opts)
+        if command ~= "gh auth token" then
+            error("unexpected command: " .. tostring(command))
+        end
+        seen_gh_env = opts.env
+        return "ghp_from_gh"
+    end,
+}
+assert_eq(ghe.token_from_gh("https://ghe.example/api/v3"), "ghp_from_gh", "gh token with mise env")
+assert_eq(seen_gh_env.GH_CONFIG_DIR, "/home/test/.config/gh", "gh config dir")
+assert_eq(seen_gh_env.PATH:sub(1, #"/home/test/.local/share/mise/shims"), "/home/test/.local/share/mise/shims", "mise shims path")
+package.loaded.cmd = prev_cmd
+package.loaded.file = prev_file
+os.getenv = prev_getenv
+RUNTIME = prev_runtime
+
 local h = ghe.headers(nil)
 assert_eq(h["User-Agent"], "mise-ghe-backend", "ua")
 assert_eq(h["Accept"], "application/vnd.github+json", "accept")
@@ -120,14 +165,14 @@ h = ghe.headers("secret")
 assert_eq(h["Authorization"], "Bearer secret", "bearer")
 assert_eq(tostring(h["Authorization"]):find("secret", 1, true) ~= nil, true, "header has token internally")
 
-local os_aliases, arch_aliases = ghe.os_arch()
-local linux = ghe.score_asset("tool-linux-amd64.tar.gz", os_aliases, arch_aliases)
-local musl = ghe.score_asset("tool-linux-amd64-musl.tar.gz", os_aliases, arch_aliases)
-local win = ghe.score_asset("tool-windows-amd64.zip", os_aliases, arch_aliases)
-local sum = ghe.score_asset("tool-linux-amd64.tar.gz.sha256", os_aliases, arch_aliases)
-assert(linux > musl, "prefer gnu over musl")
-assert(linux > win, "prefer native OS")
-assert(linux > sum, "prefer archive over checksum")
+-- score_asset and os_arch are internal; verify their effects via pick_asset
+local linux_asset = { name = "tool-linux-amd64.tar.gz",          url = "https://ghe.example/x/1" }
+local musl_asset  = { name = "tool-linux-amd64-musl.tar.gz",     url = "https://ghe.example/x/2" }
+local win_asset   = { name = "tool-windows-amd64.zip",           url = "https://ghe.example/x/3" }
+local sum_asset   = { name = "tool-linux-amd64.tar.gz.sha256",   url = "https://ghe.example/x/4" }
+assert_eq(ghe.pick_asset({ linux_asset, musl_asset }, {}).name, "tool-linux-amd64.tar.gz", "prefer gnu over musl")
+assert_eq(ghe.pick_asset({ linux_asset, win_asset },  {}).name, "tool-linux-amd64.tar.gz", "prefer native OS")
+assert_eq(ghe.pick_asset({ linux_asset, sum_asset },  {}).name, "tool-linux-amd64.tar.gz", "prefer archive over checksum")
 
 assert_eq(ghe.is_archive("a.tar.gz"), true, "tar.gz")
 assert_eq(ghe.is_archive("a.tgz"), true, "tgz")
