@@ -289,7 +289,11 @@ local function gh_auth_token(host)
     local shims = mise_shims_from_plugin_path()
     if shims then
         local sep = is_windows() and ";" or ":"
-        gh_env.PATH = shims .. sep .. (gh_env.PATH or "")
+        if gh_env.PATH and gh_env.PATH ~= "" then
+            gh_env.PATH = shims .. sep .. gh_env.PATH
+        else
+            gh_env.PATH = shims
+        end
     end
     local ok, output = pcall(cmd.exec, "gh auth token", { env = gh_env })
     if not ok then
