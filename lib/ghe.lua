@@ -163,17 +163,22 @@ local function gh_config_dir_from_plugin_path()
     if not path then return nil end
     local file = require("file")
 
-    -- plugins/ghe -> plugins -> <MISE_DATA_DIR> -> home
-    path = parent_dir(parent_dir(parent_dir(path)))
-    if not path then return nil end
-
-    for _, candidate in ipairs({
-        file.join_path(path, ".config", "gh"),
-        file.join_path(path, "AppData", "Roaming", "GitHub CLI"),
-        file.join_path(path, "Library", "Application Support", "gh"),
-    }) do
-        if file.exists(file.join_path(candidate, "hosts.yml")) then
-            return candidate
+    -- Walk up a few ancestors looking for standard gh config locations.
+    -- This avoids assuming a fixed relationship between <MISE_DATA_DIR> and $HOME.
+    local current = path
+    for _ = 1, 8 do
+        current = parent_dir(current)
+        if not current then
+            return nil
+        end
+        for _, candidate in ipairs({
+            file.join_path(current, ".config", "gh"),
+            file.join_path(current, "AppData", "Roaming", "GitHub CLI"),
+            file.join_path(current, "Library", "Application Support", "gh"),
+        }) do
+            if file.exists(file.join_path(candidate, "hosts.yml")) then
+                return candidate
+            end
         end
     end
     return nil
