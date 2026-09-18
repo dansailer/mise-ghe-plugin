@@ -530,6 +530,9 @@ function M.pick_asset(assets, options)
     options = options or {}
     local os_aliases, arch_aliases = os_arch()
     local pattern = option_string(options, "asset_pattern") or option_string(options, "matching")
+    if pattern ~= nil then
+        pattern = pattern:lower()
+    end
     local names = {}
     local best, best_score = nil, nil
     for _, asset in ipairs(assets or {}) do
