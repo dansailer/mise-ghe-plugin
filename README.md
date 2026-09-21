@@ -10,7 +10,7 @@ Use `ghe:org/repo` to install internal tools from your GHE instance. For public 
 
 ```sh
 # 1. Install the plugin
-mise plugins link ghe "https://github.com/dansailer/mise-ghe-plugin"
+mise plugins install ghe "https://github.com/dansailer/mise-ghe-plugin"
 
 # 2. Set your GHE API URL
 mise config set --global env.MISE_GHE_API_URL "https://github.mycompany.com/api/v3"
