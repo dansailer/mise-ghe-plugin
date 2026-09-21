@@ -66,7 +66,7 @@ gh auth login --hostname github.mycompany.com
 # Requires: Contents: read (for private release assets)
 ```
 
-> **If you get a 401 error:** The plugin cannot find `gh` or its config. Either set `MISE_GITHUB_ENTERPRISE_TOKEN`, or check the [gh not found](#gh-not-found) section below.
+> **If you get a 401 error:** Verify that the configured token or `gh` login is valid for the API host. If `gh` or its config cannot be found, check the [gh not found](#gh-not-found) section below.
 
 ### gh not found
 
