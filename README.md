@@ -145,7 +145,7 @@ All other tools continue to use the global `MISE_GHE_API_URL`.
 ## Uninstall
 
 ```sh
-# Remove all tools installed via this plugin, then remove the plugin itself
+# Remove each ghe: tool from the global config, then remove the plugin and its installs
 mise unuse --global 'ghe:myorg/mytool'       # repeat for each ghe: tool
 mise plugins uninstall --purge ghe
 
