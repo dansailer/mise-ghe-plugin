@@ -1,5 +1,7 @@
 # mise-ghe-plugin
 
+[![CI](https://github.com/dansailer/mise-ghe-plugin/actions/workflows/ci.yml/badge.svg)](https://github.com/dansailer/mise-ghe-plugin/actions/workflows/ci.yml)
+
 A [mise](https://mise.jdx.dev) backend plugin that installs tools from **GitHub Enterprise** release assets.
 
 Use `ghe:org/repo` to install internal tools from your GHE instance. For public GitHub tools, use mise's built-in `github:` backend instead.
@@ -80,13 +82,9 @@ gh auth login --hostname github.mycompany.com
 
 ### gh not found
 
-The plugin runs in a sanitized environment — your shell's `PATH` and `HOME` are not automatically available. It recovers them from standard locations based on the plugin directory, checking:
+If `github-cli` is in your mise config (as in [Setup](#setup)), the plugin declares it as a dependency: mise installs it first and puts its real `gh` binary on `PATH` for the plugin. Otherwise the plugin uses the `gh` on your `PATH`. mise's shims are never used, because they re-enter mise.
 
-| Platform | Config location |
-|----------|----------------|
-| Unix | `~/.config/gh/hosts.yml` |
-| macOS | `~/Library/Application Support/gh/hosts.yml` |
-| Windows | `%APPDATA%\GitHub CLI\hosts.yml` |
+gh finds its own login in its standard config directory (`$XDG_CONFIG_HOME/gh` or `~/.config/gh` on Linux and macOS, `%APPDATA%\GitHub CLI` on Windows). Only if the hook environment has none of `HOME`, `USERPROFILE`, `XDG_CONFIG_HOME` or `APPDATA` does the plugin look for those directories above the mise data directory. `gh auth token` is given 15 seconds.
 
 If your `gh` config is elsewhere, set `GH_CONFIG_DIR` in your global mise config:
 
@@ -124,9 +122,12 @@ Supported release assets: archives (`.tar.gz`/`.tgz`, `.tar.xz`/`.txz`, `.tar.bz
 | `api_url` | Override the GHE API root for one tool (use global `MISE_GHE_API_URL` instead when possible) |
 | `asset_pattern` / `matching` | Filter assets by substring, then pick by OS/arch score |
 | `bin` | Binary name for a non-archive asset (default: repo name) |
+| `prerelease` | `true` to list prereleases in `mise ls-remote` / `latest` (they can always be installed by exact version) |
 | `rename_exe` | Deprecated — use `bin` |
 | `token` | Per-tool token (use env vars instead) |
 | `verify` | `auto`, `required` or `off`; overrides `MISE_GHE_VERIFY` for this tool |
+
+Versions are the release tags with one leading `v`/`V` removed when a digit follows (`v1.2.3` → `1.2.3`; `jq-1.7.1` stays). Drafts are never listed, prereleases only with `prerelease = true`. `latest` is the release GitHub marks as *Latest*.
 
 ### Examples
 

@@ -1,0 +1,90 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v7
+      - uses: lunarmodules/luacheck@v1
+
+  unit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+      # Build Lua 5.1 from the official GitHub mirror: no lua.org or apt
+      # mirror access needed (both were unreachable from runners).
+      - uses: actions/checkout@v7
+        with:
+          repository: lua/lua
+          ref: v5.1.1
+          path: .lua-src
+      - name: Build Lua 5.1
+        run: |
+          cd .lua-src
+          gcc -O2 -w -DLUA_USE_POSIX -o lua *.c -lm
+          ./lua -v
+      - run: .lua-src/lua test/ghe_check.lua
+      - name: Syntax check
+        run: |
+          for f in metadata.lua lib/*.lua hooks/*.lua; do
+            .lua-src/lua -e "assert(loadfile('$f'))"
+          done
+
+  smoke:
+    name: smoke (${{ matrix.os }})
+    needs: [lint, unit]
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            tools: >-
+              ghe:BurntSushi/ripgrep@14.1.1=rg
+              ghe:jqlang/jq@jq-1.7.1=jq
+              ghe:cli/cli@2.63.0=gh
+              ghe:tree-sitter/tree-sitter@0.24.4=tree-sitter
+          - os: ubuntu-24.04-arm
+            tools: >-
+              ghe:BurntSushi/ripgrep@14.1.1=rg
+              ghe:jqlang/jq@jq-1.7.1=jq
+              ghe:cli/cli@2.63.0=gh
+          - os: macos-latest
+            tools: >-
+              ghe:BurntSushi/ripgrep@14.1.1=rg
+              ghe:jqlang/jq@jq-1.7.1=jq
+              ghe:cli/cli@2.63.0=gh
+              ghe:tree-sitter/tree-sitter@0.24.4=tree-sitter
+          - os: windows-latest
+            tools: >-
+              ghe:BurntSushi/ripgrep@14.1.1=rg
+              ghe:jqlang/jq@jq-1.7.1=jq
+              ghe:cli/cli@2.63.0=gh
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: jdx/mise-action@v5
+        with:
+          install: false
+          cache: false
+      - name: Install tools through the plugin
+        shell: bash
+        env:
+          MISE_GHE_API_URL: https://api.github.com
+          MISE_GHE_TOKEN: ${{ github.token }}
+        run: test/smoke.sh ${{ matrix.tools }}

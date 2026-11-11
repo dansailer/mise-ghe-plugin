@@ -219,50 +219,38 @@ local function parent_dir(path)
     return parent
 end
 
--- Find a standard gh configuration directory when mise omitted HOME from the
--- hook environment. pluginDirPath is <MISE_DATA_DIR>/plugins/ghe; two hops up
--- reach <MISE_DATA_DIR>, and one more reaches the home directory where all
--- standard gh config locations live.
+-- Find a standard gh configuration directory, only for hook environments in
+-- which gh could not find its own: none of HOME, USERPROFILE, XDG_CONFIG_HOME
+-- or APPDATA is set. pluginDirPath is <MISE_DATA_DIR>/plugins/ghe and
+-- MISE_DATA_DIR usually lives below the home directory, so the ancestors of the
+-- plugin directory are searched for gh's standard locations
+-- (<home>/.config/gh on Linux and macOS, %APPDATA%\GitHub CLI on Windows).
+-- The walk stops below the filesystem root so it never picks up /.config/gh.
 local function gh_config_dir_from_plugin_path()
+    for _, name in ipairs({ "HOME", "USERPROFILE", "XDG_CONFIG_HOME", "APPDATA" }) do
+        if nonempty(os.getenv(name)) then
+            return nil
+        end
+    end
     local path = plugin_dir_path()
-    if not path then return nil end
+    if not path then
+        return nil
+    end
     local file = require("file")
-
-    -- Walk up a few ancestors looking for standard gh config locations.
-    -- This avoids assuming a fixed relationship between <MISE_DATA_DIR> and $HOME.
     local current = path
     for _ = 1, 8 do
         current = parent_dir(current)
-        if not current then
+        if not current or not parent_dir(current) then
             return nil
         end
         for _, candidate in ipairs({
             file.join_path(current, ".config", "gh"),
             file.join_path(current, "AppData", "Roaming", "GitHub CLI"),
-            file.join_path(current, "Library", "Application Support", "gh"),
         }) do
             if file.exists(file.join_path(candidate, "hosts.yml")) then
                 return candidate
             end
         end
-    end
-    return nil
-end
-
--- Find mise's gh shim so a globally installed github-cli can be used by a hook.
--- pluginDirPath is <MISE_DATA_DIR>/plugins/ghe; two hops up reach <MISE_DATA_DIR>.
-local function mise_shims_from_plugin_path()
-    local path = plugin_dir_path()
-    if not path then return nil end
-    local file = require("file")
-
-    -- plugins/ghe -> plugins -> <MISE_DATA_DIR>
-    path = parent_dir(parent_dir(path))
-    if not path then return nil end
-
-    local shims = file.join_path(path, "shims")
-    if file.exists(file.join_path(shims, "gh")) then
-        return shims
     end
     return nil
 end
@@ -282,12 +270,14 @@ function M.api_url(options)
     end
     if not url or url == "" then
         error(
-            "GitHub Enterprise API URL is not set. Set tool option api_url, or environment variable MISE_GHE_API_URL (or GHE_API_URL). Example: https://github.mycompany.com/api/v3"
+            "GitHub Enterprise API URL is not set. Set tool option api_url, or environment variable"
+                .. " MISE_GHE_API_URL (or GHE_API_URL). Example: https://github.mycompany.com/api/v3"
         )
     end
     if not is_https(url) then
         error(
-            "GitHub Enterprise API URL must be HTTPS. Set tool option api_url, or MISE_GHE_API_URL (or GHE_API_URL). Example: https://github.mycompany.com/api/v3"
+            "GitHub Enterprise API URL must be HTTPS. Set tool option api_url, or MISE_GHE_API_URL"
+                .. " (or GHE_API_URL). Example: https://github.mycompany.com/api/v3"
         )
     end
     if url:find("@", 1, true) then
@@ -336,10 +326,13 @@ function M.same_http_host(url, api_url)
     return false
 end
 
--- Set while `gh auth token` runs. When gh resolves to mise's shim, the shim
--- re-enters mise, which may call this plugin again to resolve a not-yet-installed
--- ghe tool; that nested call must not invoke gh again or it recurses forever.
+-- Set while `gh auth token` runs. mise removes its shims from the hook PATH,
+-- and the plugin finds a mise-managed gh through PLUGIN.depends instead. If gh
+-- still resolves to a mise shim (e.g. a shims dir listed twice in PATH), the
+-- shim re-enters mise, which may call this plugin again; that nested call must
+-- not invoke gh again or it recurses forever.
 local GH_LOOKUP_GUARD = "MISE_GHE_IN_GH_LOOKUP"
+local GH_TIMEOUT_SECONDS = 15
 
 -- Ask gh for a token without interpolating the host into shell source.
 -- The explicit environment repairs the sanitized environment used by mise hooks.
@@ -354,8 +347,8 @@ local function gh_auth_token(host)
         GH_HOST = host,
         GH_PROMPT_DISABLED = "1",
         GIT_TERMINAL_PROMPT = "0",
-        -- Resolve GH_CONFIG_DIR once: prefer the environment value, fall back to
-        -- path discovery so the standard gh login works without any manual config.
+        -- Prefer the environment value; discovery only runs when gh would have no
+        -- home directory to find its own config in.
         GH_CONFIG_DIR = nonempty(os.getenv("GH_CONFIG_DIR")) or gh_config_dir_from_plugin_path(),
     }
     for _, name in ipairs({ "PATH", "HOME", "USERPROFILE", "XDG_CONFIG_HOME", "APPDATA", "LOCALAPPDATA" }) do
@@ -364,19 +357,8 @@ local function gh_auth_token(host)
             gh_env[name] = value
         end
     end
-    -- Backend hooks may not include mise-managed tool paths in PATH. Append the
-    -- shims dir as a last resort only: a real gh already on PATH must win, because
-    -- the gh shim is mise itself and re-enters this plugin.
-    local shims = mise_shims_from_plugin_path()
-    if shims then
-        local sep = is_windows() and ";" or ":"
-        if gh_env.PATH and gh_env.PATH ~= "" then
-            gh_env.PATH = gh_env.PATH .. sep .. shims
-        else
-            gh_env.PATH = shims
-        end
-    end
-    local ok, output = pcall(cmd.exec, "gh auth token", { env = gh_env })
+    -- A hanging gh (e.g. a credential helper waiting for input) must not block mise.
+    local ok, output = pcall(cmd.exec, "gh auth token", { env = gh_env, timeout = GH_TIMEOUT_SECONDS })
     if not ok then
         return nil
     end
@@ -575,14 +557,45 @@ function M.get_json(url, token)
     return data
 end
 
---- Fetch all published releases for a repository, up to ten API pages.
--- The API's release order is preserved for later version ordering decisions.
+-- Report a non-fatal problem through mise's log when it is available.
+local function log_warn(msg)
+    local ok, log = pcall(require, "log")
+    if ok and type(log) == "table" and log.warn then
+        log.warn(msg)
+    end
+end
+
+--- Fetch a JSON API resource that may not exist: nil on 404, data otherwise.
+-- Other errors are raised with the same messages as get_json.
+function M.try_get_json(url, token)
+    local http = require("http")
+    local json = require("json")
+    local resp = http.get({ url = url, headers = M.headers(token) })
+    if resp and resp.status_code == 404 then
+        return nil
+    end
+    if resp and resp.status_code >= 200 and resp.status_code < 300 then
+        local ok, data = pcall(json.decode, resp.body or "")
+        if ok then
+            return data
+        end
+    end
+    -- Let get_json produce its status-specific error message.
+    return M.get_json(url, token)
+end
+
+-- Maximum number of release pages (100 releases each) that are listed.
+local MAX_RELEASE_PAGES = 10
+
+--- Fetch all published releases for a repository, up to MAX_RELEASE_PAGES
+-- API pages (drafts are included and filtered by the callers). The API's
+-- newest-first order is preserved.
 function M.list_releases(api_url, owner, repo, token)
     local all = {}
     local page = 1
     local owner_esc = path_escape(owner)
     local repo_esc = path_escape(repo)
-    while page <= 10 do
+    while page <= MAX_RELEASE_PAGES do
         local url = string.format(
             "%s/repos/%s/%s/releases?per_page=100&page=%d",
             api_url,
@@ -610,17 +623,41 @@ function M.list_releases(api_url, owner, repo, token)
         if #data < 100 then
             break
         end
+        if page == MAX_RELEASE_PAGES then
+            log_warn(
+                owner
+                    .. "/"
+                    .. repo
+                    .. " has more than "
+                    .. (MAX_RELEASE_PAGES * 100)
+                    .. " releases; only the newest "
+                    .. (MAX_RELEASE_PAGES * 100)
+                    .. " are listed"
+            )
+        end
         page = page + 1
     end
     return all
 end
 
---- Remove one conventional leading v from a release tag.
+--- Return the tag of the release GitHub marks as "Latest", or nil.
+-- That release is never a draft or prerelease.
+function M.latest_release_tag(api_url, owner, repo, token)
+    local url = string.format("%s/repos/%s/%s/releases/latest", api_url, path_escape(owner), path_escape(repo))
+    local data = M.try_get_json(url, token)
+    if type(data) ~= "table" then
+        return nil
+    end
+    return nonempty(data.tag_name)
+end
+
+--- Remove one conventional leading v from a release tag: only a "v" or "V"
+-- directly followed by a digit (v1.2.3 -> 1.2.3, but version-1 stays).
 function M.normalize_tag(tag)
     if type(tag) ~= "string" then
         return tag
     end
-    return (tag:gsub("^v", ""))
+    return (tag:gsub("^[vV](%d)", "%1"))
 end
 
 -- Match a requested version while accepting either v1.2.3 or 1.2.3.
@@ -831,15 +868,29 @@ function M.find_release(releases, version)
     )
 end
 
+--- Report whether the tool option `prerelease` asks for prereleases.
+function M.include_prereleases(options)
+    local value = type(options) == "table" and options.prerelease
+    if type(value) == "string" then
+        value = trim(value):lower()
+        return value == "true" or value == "1" or value == "yes"
+    end
+    return value == true
+end
+
 --- Convert non-draft releases into unique versions, oldest first.
--- The GHE API returns releases newest-first; iterating in reverse gives oldest-first.
-function M.versions_from_releases(releases)
+-- The API returns releases newest-first; iterating in reverse gives oldest-first.
+-- Prereleases are skipped unless include_prereleases is true. mise treats the
+-- last version as `latest`, so the release GitHub marks as "Latest"
+-- (latest_tag) is moved to the end: a backport published after a newer
+-- major release then does not become `latest`.
+function M.versions_from_releases(releases, include_prereleases, latest_tag)
     local seen = {}
     local result = {}
     local list = releases or {}
     for i = #list, 1, -1 do
         local rel = list[i]
-        if rel.draft ~= true then
+        if rel.draft ~= true and (include_prereleases or rel.prerelease ~= true) then
             local tag = release_tag(rel)
             if tag then
                 local v = M.normalize_tag(tag)
@@ -850,7 +901,44 @@ function M.versions_from_releases(releases)
             end
         end
     end
+    local latest = latest_tag and M.normalize_tag(latest_tag)
+    if latest and seen[latest] and result[#result] ~= latest then
+        for i, v in ipairs(result) do
+            if v == latest then
+                table.remove(result, i)
+                break
+            end
+        end
+        table.insert(result, latest)
+    end
     return result
+end
+
+--- Fetch the non-draft release for one version, trying the tags endpoint
+-- for the version as given and with/without a leading "v" before falling
+-- back to the full release list (for releases found only by display name).
+function M.get_release(api_url, owner, repo, version, token)
+    local candidates = { version }
+    local normalized = M.normalize_tag(version)
+    if normalized ~= version then
+        table.insert(candidates, normalized)
+    elseif version:match("^%d") then
+        table.insert(candidates, "v" .. version)
+    end
+    for _, tag in ipairs(candidates) do
+        local url = string.format(
+            "%s/repos/%s/%s/releases/tags/%s",
+            api_url,
+            path_escape(owner),
+            path_escape(repo),
+            path_escape(tag)
+        )
+        local rel = M.try_get_json(url, token)
+        if type(rel) == "table" and rel.draft ~= true and type(rel.assets) == "table" then
+            return rel
+        end
+    end
+    return M.find_release(M.list_releases(api_url, owner, repo, token), version)
 end
 
 -- How the installer handles each asset suffix, longest suffixes first.
@@ -937,14 +1025,6 @@ function M.download_asset(asset, dest, token, api_url)
     end
     if not file.exists(dest) then
         error("Download failed: file was not written")
-    end
-end
-
--- Report a non-fatal problem through mise's log when it is available.
-local function log_warn(msg)
-    local ok, log = pcall(require, "log")
-    if ok and type(log) == "table" and log.warn then
-        log.warn(msg)
     end
 end
 
@@ -1247,7 +1327,7 @@ function M.install_asset(path, install_path, options, repo)
         extract_with_tar(path, install_path)
         return
     end
-    local dest = file.join_path(install_path, M.bin_name(options, repo))
+    local dest = file.join_path(install_path, M.bin_name(options, repo, M.safe_filename(path)))
     if format and format.kind == "compressed" then
         decompress_single(format, path, dest)
     else
@@ -1265,15 +1345,31 @@ function M.chmod_x(path)
     cmd.exec('chmod +x "$MISE_GHE_BIN"', { env = { MISE_GHE_BIN = path } })
 end
 
+-- File extensions Windows runs through PATHEXT.
+local WINDOWS_EXEC_SUFFIXES = { ".exe", ".cmd", ".bat", ".ps1", ".com" }
+
 --- Resolve and validate the installed binary name for a repository.
--- The bin option is preferred; rename_exe is a deprecated synonym.
-function M.bin_name(options, repo)
+-- The bin option is preferred; rename_exe is a deprecated synonym. On Windows
+-- the name gets the asset's executable extension (default .exe) unless it
+-- already has one, because Windows only runs files with a PATHEXT extension.
+function M.bin_name(options, repo, asset_name)
     local name = option_string(options, "bin")
-        or option_string(options, "rename_exe")  -- deprecated: use bin
+        or option_string(options, "rename_exe") -- deprecated: use bin
         or repo
     local safe = M.safe_filename(name)
     if not safe then
         error("Invalid binary name")
+    end
+    if is_windows() and not any_suffix(safe:lower(), WINDOWS_EXEC_SUFFIXES) then
+        local ext = ".exe"
+        if type(asset_name) == "string" then
+            for _, suffix in ipairs(WINDOWS_EXEC_SUFFIXES) do
+                if ends_with(asset_name:lower(), suffix) then
+                    ext = suffix
+                end
+            end
+        end
+        safe = safe .. ext
     end
     return safe
 end
