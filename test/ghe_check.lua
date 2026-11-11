@@ -372,6 +372,121 @@ assert_eq(ghe.is_archive("a.tgz"), true, "tgz")
 assert_eq(ghe.is_archive("a.zip"), true, "zip")
 assert_eq(ghe.is_archive("a"), false, "plain binary")
 
+-- Asset formats and installation (#6).
+assert_eq(ghe.is_archive("A.TAR.GZ"), true, "upper-case tar.gz")
+assert_eq(ghe.is_archive("a.tar"), true, "tar")
+assert_eq(ghe.is_archive("a.tar.zst"), true, "tar.zst")
+assert_eq(ghe.is_archive("a.gz"), false, "single gz is not an archive")
+assert_eq(ghe.asset_format("a.tgz").ext, ".tar.gz", "tgz canonical")
+assert_eq(ghe.asset_format("a.TXZ").ext, ".tar.xz", "txz canonical")
+assert_eq(ghe.asset_format("a.tbz2").ext, ".tar.bz2", "tbz2 canonical")
+assert_eq(ghe.asset_format("a.tar.gz").kind, "archiver", "tar.gz via archiver")
+assert_eq(ghe.asset_format("a.tar").kind, "tar", "tar via system tar")
+assert_eq(ghe.asset_format("tool-linux-x64.gz").tool, "gzip", "single gz")
+assert_eq(ghe.asset_format("tool.xz").tool, "xz", "single xz")
+assert_eq(ghe.asset_format("tool.bz2").tool, "bzip2", "single bz2")
+assert_eq(ghe.asset_format("tool.zst").tool, "zstd", "single zst")
+assert_eq(ghe.asset_format("tool.7z").kind, "unsupported", "7z")
+assert_eq(ghe.asset_format("tool-linux-amd64"), nil, "raw binary")
+assert_eq(ghe.asset_format(".gz"), nil, "bare suffix is not a format")
+
+-- install_asset with stubbed mise modules; records every call.
+local function with_install_stubs(os_type, tar_listing, fn)
+    local calls = {}
+    local saved = {
+        runtime = RUNTIME,
+        file = package.loaded.file,
+        archiver = package.loaded.archiver,
+        cmd = package.loaded.cmd,
+    }
+    RUNTIME = { osType = os_type, archType = "amd64" }
+    package.loaded.file = {
+        join_path = function(...)
+            return table.concat({ ... }, "/")
+        end,
+        move = function(from, to)
+            table.insert(calls, "move " .. from .. " -> " .. to)
+        end,
+    }
+    package.loaded.archiver = {
+        decompress = function(archive, dest, opts)
+            local strip = tostring(opts.strip_components)
+            table.insert(calls, "decompress " .. archive .. " -> " .. dest .. " strip=" .. strip)
+        end,
+    }
+    package.loaded.cmd = {
+        exec = function(command)
+            if command:find("ghe", 1, true) or command:find("/dl/", 1, true) then
+                error("paths must be passed via env, not interpolated: " .. command)
+            end
+            table.insert(calls, "exec " .. command)
+            if command:find("-tf", 1, true) then
+                return tar_listing or ""
+            end
+            return ""
+        end,
+    }
+    local ok, err = pcall(fn)
+    RUNTIME = saved.runtime
+    package.loaded.file = saved.file
+    package.loaded.archiver = saved.archiver
+    package.loaded.cmd = saved.cmd
+    if not ok then
+        error(err, 0)
+    end
+    return calls
+end
+
+local calls = with_install_stubs("linux", nil, function()
+    ghe.install_asset("/dl/tool-linux-amd64.tgz", "/inst", {}, "tool")
+end)
+assert_eq(calls[1], "move /dl/tool-linux-amd64.tgz -> /dl/mise-ghe-asset.tar.gz", "tgz renamed for archiver")
+assert_eq(calls[2], "decompress /dl/mise-ghe-asset.tar.gz -> /inst strip=1", "tgz extracted")
+
+calls = with_install_stubs("linux", nil, function()
+    ghe.install_asset("/dl/TOOL.TAR.GZ", "/inst", {}, "tool")
+end)
+assert_eq(calls[2], "decompress /dl/mise-ghe-asset.tar.gz -> /inst strip=1", "upper-case suffix normalized")
+
+calls = with_install_stubs("linux", nil, function()
+    ghe.install_asset("/dl/tool.tar.gz", "/inst", {}, "tool")
+end)
+assert_eq(calls[1], "move /dl/tool.tar.gz -> /dl/mise-ghe-asset.tar.gz", "tar.gz uses a fixed local name")
+
+calls = with_install_stubs("linux", "tool-1.0/\ntool-1.0/bin/tool\n", function()
+    ghe.install_asset("/dl/tool.tar", "/inst", {}, "tool")
+end)
+assert_eq(calls[1], 'exec tar -tf "$MISE_GHE_ARCHIVE"', "tar listed")
+assert_eq(calls[2], 'exec tar -xf "$MISE_GHE_ARCHIVE" -C "$MISE_GHE_DEST" --strip-components=1', "single dir stripped")
+
+calls = with_install_stubs("linux", "./tool\n./README.md\n", function()
+    ghe.install_asset("/dl/tool.tar.zst", "/inst", {}, "tool")
+end)
+assert_eq(calls[2], 'exec tar -xf "$MISE_GHE_ARCHIVE" -C "$MISE_GHE_DEST"', "root files kept")
+
+calls = with_install_stubs("linux", nil, function()
+    ghe.install_asset("/dl/tool-linux-x64.gz", "/inst", { bin = "tree-sitter" }, "tool")
+end)
+assert_eq(calls[1], 'exec gzip -dc "$MISE_GHE_SOURCE" > "$MISE_GHE_DEST"', "gz decompressed, not moved")
+assert_eq(calls[2], 'exec chmod +x "$MISE_GHE_BIN"', "decompressed binary made executable")
+assert_eq(#calls, 2, "no move of the compressed file")
+
+calls = with_install_stubs("linux", nil, function()
+    ghe.install_asset("/dl/tool-linux-amd64", "/inst", {}, "tool")
+end)
+assert_eq(calls[1], "move /dl/tool-linux-amd64 -> /inst/tool", "raw binary moved")
+
+assert_err(function()
+    with_install_stubs("windows", nil, function()
+        ghe.install_asset("/dl/tool-windows-x64.gz", "/inst", {}, "tool")
+    end)
+end, "not supported on Windows", "single gz on windows")
+assert_err(function()
+    with_install_stubs("linux", nil, function()
+        ghe.install_asset("/dl/tool.7z", "/inst", {}, "tool")
+    end)
+end, "Unsupported asset format .7z", "7z rejected")
+
 local releases = {
     {
         tag_name = "v1.2.3",

@@ -1,5 +1,4 @@
 local file = require("file")
-local archiver = require("archiver")
 local ghe = require("ghe")
 
 function PLUGIN:BackendInstall(ctx)
@@ -34,13 +33,7 @@ function PLUGIN:BackendInstall(ctx)
     local archive_path = file.join_path(download_path, filename)
     ghe.download_asset(asset, archive_path, token, api_url)
 
-    if ghe.is_archive(filename) then
-        archiver.decompress(archive_path, install_path, { strip_components = 1 })
-    else
-        local dest = file.join_path(install_path, ghe.bin_name(options, repo))
-        file.move(archive_path, dest)
-        ghe.chmod_x(dest)
-    end
+    ghe.install_asset(archive_path, install_path, options, repo)
 
     return {}
 end
