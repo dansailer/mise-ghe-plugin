@@ -68,6 +68,7 @@ local EMULATED_ARCH = {
 local UNIVERSAL_TOKENS = { "universal", "universal2" }
 
 -- Suffixes identifying metadata sidecars and extractable archives.
+-- stylua: ignore
 local SIDECAR_SUFFIXES = {
     ".sha256", ".sha256sum", ".sha512", ".sha512sum", ".sha1", ".md5", ".b3",
     ".asc", ".sig", ".minisig", ".pem", ".crt", ".cert", ".pub", ".sigstore", ".intoto.jsonl",
@@ -76,6 +77,7 @@ local SIDECAR_SUFFIXES = {
 local ARCHIVE_SUFFIXES = { ".tar.gz", ".tgz", ".tar.xz", ".tar.bz2", ".zip", ".tar" }
 
 -- OS installer packages; this plugin cannot install them, so they are never selected.
+-- stylua: ignore
 local PACKAGE_SUFFIXES = {
     ".deb", ".rpm", ".apk", ".pkg", ".dmg", ".msi", ".msix", ".appx", ".snap", ".flatpak", ".nupkg",
 }
@@ -144,9 +146,7 @@ local function is_sidecar(name)
         return true
     end
     local base = lower:match("([^/]*)$")
-    return base:match("^sha%d*sums?$") ~= nil
-        or base:match("^md5sums?$") ~= nil
-        or base:match("checksums?$") ~= nil
+    return base:match("^sha%d*sums?$") ~= nil or base:match("^md5sums?$") ~= nil or base:match("checksums?$") ~= nil
 end
 
 -- OS installer packages (.deb, .msi, ...) are not installable by this plugin.
@@ -225,7 +225,9 @@ end
 -- standard gh config locations live.
 local function gh_config_dir_from_plugin_path()
     local path = plugin_dir_path()
-    if not path then return nil end
+    if not path then
+        return nil
+    end
     local file = require("file")
 
     -- Walk up a few ancestors looking for standard gh config locations.
@@ -253,12 +255,16 @@ end
 -- pluginDirPath is <MISE_DATA_DIR>/plugins/ghe; two hops up reach <MISE_DATA_DIR>.
 local function mise_shims_from_plugin_path()
     local path = plugin_dir_path()
-    if not path then return nil end
+    if not path then
+        return nil
+    end
     local file = require("file")
 
     -- plugins/ghe -> plugins -> <MISE_DATA_DIR>
     path = parent_dir(parent_dir(path))
-    if not path then return nil end
+    if not path then
+        return nil
+    end
 
     local shims = file.join_path(path, "shims")
     if file.exists(file.join_path(shims, "gh")) then
@@ -275,8 +281,7 @@ end
 --- Resolve and validate the GHE API root.
 -- A tool option overrides MISE_GHE_API_URL, which overrides GHE_API_URL.
 function M.api_url(options)
-    local url = option_string(options, "api_url")
-        or env_first({ "MISE_GHE_API_URL", "GHE_API_URL" })
+    local url = option_string(options, "api_url") or env_first({ "MISE_GHE_API_URL", "GHE_API_URL" })
     if url then
         url = url:gsub("/+$", "")
     end
@@ -561,12 +566,7 @@ function M.get_json(url, token)
         )
     end
     if status < 200 or status >= 300 then
-        error(
-            "GitHub Enterprise API returned "
-                .. tostring(status)
-                .. ": "
-                .. truncate(resp.body, 500)
-        )
+        error("GitHub Enterprise API returned " .. tostring(status) .. ": " .. truncate(resp.body, 500))
     end
     local ok, data = pcall(json.decode, resp.body or "")
     if not ok then
@@ -583,13 +583,7 @@ function M.list_releases(api_url, owner, repo, token)
     local owner_esc = path_escape(owner)
     local repo_esc = path_escape(repo)
     while page <= 10 do
-        local url = string.format(
-            "%s/repos/%s/%s/releases?per_page=100&page=%d",
-            api_url,
-            owner_esc,
-            repo_esc,
-            page
-        )
+        local url = string.format("%s/repos/%s/%s/releases?per_page=100&page=%d", api_url, owner_esc, repo_esc, page)
         local data = M.get_json(url, token)
         if type(data) ~= "table" then
             error("Unexpected JSON listing releases for " .. owner .. "/" .. repo)
@@ -753,9 +747,7 @@ local function score_asset(name, os_type, arch_group)
     if any_suffix(name, ARCHIVE_SUFFIXES) then
         score = score + 10
     end
-    local acceptable = os_kind ~= "foreign"
-        and arch_kind ~= "foreign"
-        and (os_kind == "native" or arch_kind ~= "none")
+    local acceptable = os_kind ~= "foreign" and arch_kind ~= "foreign" and (os_kind == "native" or arch_kind ~= "none")
     return score, acceptable
 end
 
@@ -826,9 +818,7 @@ function M.find_release(releases, version)
             end
         end
     end
-    error(
-        "Unknown version '" .. tostring(version) .. "'. Available: " .. list_for_error(available, 20)
-    )
+    error("Unknown version '" .. tostring(version) .. "'. Available: " .. list_for_error(available, 20))
 end
 
 --- Convert non-draft releases into unique versions, oldest first.
@@ -1058,7 +1048,7 @@ end
 -- The bin option is preferred; rename_exe is a deprecated synonym.
 function M.bin_name(options, repo)
     local name = option_string(options, "bin")
-        or option_string(options, "rename_exe")  -- deprecated: use bin
+        or option_string(options, "rename_exe") -- deprecated: use bin
         or repo
     local safe = M.safe_filename(name)
     if not safe then
