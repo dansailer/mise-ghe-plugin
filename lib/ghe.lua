@@ -271,12 +271,21 @@ function M.same_http_host(url, api_url)
     return false
 end
 
+-- Set while `gh auth token` runs. When gh resolves to mise's shim, the shim
+-- re-enters mise, which may call this plugin again to resolve a not-yet-installed
+-- ghe tool; that nested call must not invoke gh again or it recurses forever.
+local GH_LOOKUP_GUARD = "MISE_GHE_IN_GH_LOOKUP"
+
 -- Ask gh for a token without interpolating the host into shell source.
 -- The explicit environment repairs the sanitized environment used by mise hooks.
 local function gh_auth_token(host)
+    if nonempty(os.getenv(GH_LOOKUP_GUARD)) then
+        return nil
+    end
     local cmd = require("cmd")
     -- Host goes through GH_HOST so it is never interpolated into the shell string.
     local gh_env = {
+        [GH_LOOKUP_GUARD] = "1",
         GH_HOST = host,
         GH_PROMPT_DISABLED = "1",
         GIT_TERMINAL_PROMPT = "0",
@@ -290,12 +299,14 @@ local function gh_auth_token(host)
             gh_env[name] = value
         end
     end
-    -- Backend hooks may not include mise-managed tool paths in PATH.
+    -- Backend hooks may not include mise-managed tool paths in PATH. Append the
+    -- shims dir as a last resort only: a real gh already on PATH must win, because
+    -- the gh shim is mise itself and re-enters this plugin.
     local shims = mise_shims_from_plugin_path()
     if shims then
         local sep = is_windows() and ";" or ":"
         if gh_env.PATH and gh_env.PATH ~= "" then
-            gh_env.PATH = shims .. sep .. gh_env.PATH
+            gh_env.PATH = gh_env.PATH .. sep .. shims
         else
             gh_env.PATH = shims
         end
