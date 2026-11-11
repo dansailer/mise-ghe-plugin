@@ -270,12 +270,14 @@ function M.api_url(options)
     end
     if not url or url == "" then
         error(
-            "GitHub Enterprise API URL is not set. Set tool option api_url, or environment variable MISE_GHE_API_URL (or GHE_API_URL). Example: https://github.mycompany.com/api/v3"
+            "GitHub Enterprise API URL is not set. Set tool option api_url, or environment variable"
+                .. " MISE_GHE_API_URL (or GHE_API_URL). Example: https://github.mycompany.com/api/v3"
         )
     end
     if not is_https(url) then
         error(
-            "GitHub Enterprise API URL must be HTTPS. Set tool option api_url, or MISE_GHE_API_URL (or GHE_API_URL). Example: https://github.mycompany.com/api/v3"
+            "GitHub Enterprise API URL must be HTTPS. Set tool option api_url, or MISE_GHE_API_URL"
+                .. " (or GHE_API_URL). Example: https://github.mycompany.com/api/v3"
         )
     end
     if url:find("@", 1, true) then

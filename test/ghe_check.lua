@@ -47,7 +47,11 @@ assert_err(function()
     ghe.api_url({ api_url = "https://user:pass@ghe.example/api/v3" })
 end, "userinfo", "reject userinfo")
 assert_eq(ghe.host_from_api_url("https://github.mycompany.com/api/v3"), "github.mycompany.com", "host")
-assert_eq(ghe.host_from_api_url("https://user:pass@github.mycompany.com:443/api/v3"), "github.mycompany.com", "strip userinfo/port")
+assert_eq(
+    ghe.host_from_api_url("https://user:pass@github.mycompany.com:443/api/v3"),
+    "github.mycompany.com",
+    "strip userinfo/port"
+)
 assert_eq(
     ghe.same_http_host("https://ghe.example/api/v3/repos/o/r/releases/assets/1", "https://ghe.example/api/v3"),
     true,
@@ -348,7 +352,11 @@ local win_asset   = { name = "tool-windows-amd64.zip",           url = "https://
 local sum_asset   = { name = "tool-linux-amd64.tar.gz.sha256",   url = "https://ghe.example/x/4" }
 assert_eq(ghe.pick_asset({ linux_asset, musl_asset }, {}).name, "tool-linux-amd64.tar.gz", "prefer gnu over musl")
 assert_eq(ghe.pick_asset({ linux_asset, win_asset },  {}).name, "tool-linux-amd64.tar.gz", "prefer native OS")
-assert_eq(ghe.pick_asset({ linux_asset, sum_asset },  {}).name, "tool-linux-amd64.tar.gz", "prefer archive over checksum")
+assert_eq(
+    ghe.pick_asset({ linux_asset, sum_asset }, {}).name,
+    "tool-linux-amd64.tar.gz",
+    "prefer archive over checksum"
+)
 
 -- Platform-aware asset selection (#4, #5). pick_asset reads RUNTIME on each call.
 local function names_to_assets(text)

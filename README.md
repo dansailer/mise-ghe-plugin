@@ -1,5 +1,7 @@
 # mise-ghe-plugin
 
+[![CI](https://github.com/dansailer/mise-ghe-plugin/actions/workflows/ci.yml/badge.svg)](https://github.com/dansailer/mise-ghe-plugin/actions/workflows/ci.yml)
+
 A [mise](https://mise.jdx.dev) backend plugin that installs tools from **GitHub Enterprise** release assets.
 
 Use `ghe:org/repo` to install internal tools from your GHE instance. For public GitHub tools, use mise's built-in `github:` backend instead.
