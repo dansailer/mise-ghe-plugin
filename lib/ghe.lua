@@ -87,6 +87,19 @@ local STRIP_SUFFIXES = { ".tar", ".gz", ".tgz", ".xz", ".txz", ".bz2", ".tbz2", 
 local PENALIZED_TOKENS = { "debug", "dbg", "test", "tests", "symbols" }
 
 -- Trim optional configuration values before they are validated or compared.
+-- Write to mise's log at the given level ("debug", "warn", ...) when the log
+-- module is available (it is not in the offline tests). Never log tokens.
+local function log_at(level, msg)
+    local ok, log = pcall(require, "log")
+    if ok and type(log) == "table" and type(log[level]) == "function" then
+        log[level](msg)
+    end
+end
+
+local function log_debug(msg)
+    log_at("debug", msg)
+end
+
 local function trim(s)
     if type(s) ~= "string" then
         return s
@@ -290,19 +303,45 @@ function M.api_url(options)
             "GitHub Enterprise API URL must be HTTPS. Set tool option api_url, or MISE_GHE_API_URL (or GHE_API_URL). Example: https://github.mycompany.com/api/v3"
         )
     end
-    if url:find("@", 1, true) then
+    if (url:match("^https?://([^/?#]*)") or ""):find("@", 1, true) then
         error("GitHub Enterprise API URL must not include userinfo (user:password@). Use a token env var instead.")
     end
+    log_debug("Using API URL " .. url)
     return url
 end
 
 --- Extract the hostname from an API or asset URL.
-function M.host_from_api_url(api_url)
-    if type(api_url) ~= "string" then
-        return nil
+-- Split a URL's authority into a lowercase host and a port (nil when absent).
+-- IPv6 literals keep their brackets ("[::1]").
+local function host_and_port(url)
+    if type(url) ~= "string" then
+        return nil, nil
     end
-    local host = api_url:gsub("^https?://", ""):gsub("^[^/]*@", ""):gsub("/.*$", ""):gsub(":.*$", "")
-    return nonempty(host:lower())
+    local authority = url:gsub("^%a[%w+.-]*://", ""):match("^([^/?#]*)") or ""
+    authority = authority:gsub("^.*@", "")
+    local host, port
+    if authority:sub(1, 1) == "[" then
+        host, port = authority:match("^(%[[^%]]*%])(.*)$")
+        port = port and port:match("^:(%d+)$")
+    else
+        host, port = authority:match("^([^:]*):?(%d*)$")
+    end
+    host = nonempty(host and host:lower())
+    return host, nonempty(port)
+end
+
+function M.host_from_api_url(api_url)
+    local host = host_and_port(api_url)
+    return host
+end
+
+-- Return the effective port of an http(s) URL (default 443 / 80).
+local function effective_port(url)
+    local _, port = host_and_port(url)
+    if port then
+        return tonumber(port)
+    end
+    return url:match("^[Hh][Tt][Tt][Pp]://") and 80 or 443
 end
 
 --- Return host candidates used for gh authentication and same-host checks.
@@ -325,6 +364,9 @@ end
 --- Check whether two URL hosts resolve to the same accepted GHE host.
 -- This prevents authenticated asset downloads from following a different host.
 function M.same_http_host(url, api_url)
+    if effective_port(url) ~= effective_port(api_url) then
+        return false
+    end
     local api_hosts = M.gh_hosts_for_api_url(api_url)
     for _, host in ipairs(M.gh_hosts_for_api_url(url)) do
         for _, api_host in ipairs(api_hosts) do
@@ -465,12 +507,14 @@ end
 function M.token(options, api_url)
     local explicit = option_string(options, "token")
     if explicit then
+        log_debug("Using the token from the tool option")
         return explicit
     end
     local host = M.host_from_api_url(api_url)
     if host and M.ghe_token_hosts()[host] then
         local token = env_first(GHE_TOKEN_VARS)
         if token then
+            log_debug("Using a token from MISE_GITHUB_ENTERPRISE_TOKEN/MISE_GHE_TOKEN for " .. host)
             return token
         end
     elseif host then
@@ -482,10 +526,13 @@ function M.token(options, api_url)
     end
     local from_gh = M.token_from_gh(api_url)
     if from_gh then
+        log_debug("Using the gh CLI token for " .. tostring(host))
         return from_gh
     end
     if host and M.generic_token_hosts()[host] then
-        return env_first(GENERIC_TOKEN_VARS)
+        local generic = env_first(GENERIC_TOKEN_VARS)
+        log_debug(generic and ("Using a generic GitHub token env var for " .. host) or ("No token found for " .. host))
+        return generic
     elseif host then
         warn_token_withheld(
             GENERIC_TOKEN_VARS,
@@ -493,6 +540,7 @@ function M.token(options, api_url)
             "generic GitHub tokens are only sent to github.com unless MISE_GHE_ALLOW_GITHUB_TOKEN=1"
         )
     end
+    log_debug("No token found for " .. tostring(host))
     return nil
 end
 
@@ -524,49 +572,101 @@ function M.headers(token, accept)
     return headers
 end
 
+-- Read a response header case-insensitively.
+local function header(headers, name)
+    if type(headers) ~= "table" then
+        return nil
+    end
+    local value = headers[name]
+    if value == nil then
+        for k, v in pairs(headers) do
+            if type(k) == "string" and k:lower() == name then
+                value = v
+                break
+            end
+        end
+    end
+    return value and tostring(value)
+end
+
+--- Build the error message for a non-2xx GitHub API response.
+-- Distinguishes rate limiting, failed authentication, missing permissions
+-- and "not found" (which GitHub also returns for private repositories the
+-- caller cannot see, and for an api_url without /api/v3).
+function M.http_error_message(url, status, headers, body, sent_token)
+    local hosts = M.gh_hosts_for_api_url(url)
+    local host = hosts[#hosts]
+    local gh_login = host and ("gh auth login --hostname " .. host) or "gh auth login"
+    local gh_status = host and ("gh auth status --hostname " .. host) or "gh auth status"
+    local api_hint = " Check api_url (tool option api_url, MISE_GHE_API_URL, or GHE_API_URL)."
+    local remaining = header(headers, "x-ratelimit-remaining")
+    if status == 429 or (status == 403 and remaining == "0") then
+        local msg = "GitHub API rate limit exceeded (" .. tostring(status) .. ")"
+        local reset = tonumber(header(headers, "x-ratelimit-reset") or "")
+        if reset then
+            msg = msg .. "; it resets at " .. os.date("!%Y-%m-%d %H:%M:%S UTC", reset)
+        end
+        if not sent_token then
+            msg = msg .. ". Requests without a token have a much lower limit: authenticate with " .. gh_login
+        end
+        return msg .. "."
+    end
+    if status == 401 then
+        return "GitHub API returned 401: authentication failed for "
+            .. tostring(M.host_from_api_url(url))
+            .. ". The token is missing, invalid or expired. Authenticate with gh ("
+            .. gh_login
+            .. "), or set MISE_GITHUB_ENTERPRISE_TOKEN or MISE_GHE_TOKEN (Contents: read)."
+            .. " Environment tokens are only sent to the MISE_GHE_API_URL host or hosts in MISE_GHE_TOKEN_HOSTS"
+            .. " (see the README)."
+    end
+    if status == 403 then
+        return "GitHub API returned 403 (forbidden) for "
+            .. url
+            .. ". The token lacks access: it needs Contents: read on the repository, and SSO authorization"
+            .. " if the organization uses SAML SSO. Check with "
+            .. gh_status
+            .. ". Response: "
+            .. truncate(body, 200)
+    end
+    if status == 404 then
+        local msg = "GitHub API returned 404 for " .. url .. ". Check the org/repo name."
+        if sent_token then
+            msg = msg .. " If the repository is private, make sure your token can read it (" .. gh_status .. ")."
+        else
+            msg = msg
+                .. " No token was sent: if the repository is private, authenticate with gh ("
+                .. gh_login
+                .. ") or set MISE_GHE_TOKEN."
+        end
+        local api_root = url:match("^(https?://[^/]+)/repos/") or url:match("^(https?://[^/]+)/?$")
+        local url_host = M.host_from_api_url(url)
+        if api_root and url_host and url_host:sub(1, 4) ~= "api." then
+            msg = msg .. " api_url has no API path: did you mean " .. api_root .. "/api/v3?"
+        else
+            msg = msg .. api_hint
+        end
+        return msg
+    end
+    return "GitHub API returned " .. tostring(status) .. " for " .. url .. ": " .. truncate(body, 500)
+end
+
 --- Fetch and decode a JSON API response with useful status-specific errors.
 function M.get_json(url, token)
     local http = require("http")
     local json = require("json")
-    local resp, err = http.get({
+    log_debug("GET " .. url .. (token and " (with token)" or " (no token)"))
+    -- http.get raises on network errors itself.
+    local resp = http.get({
         url = url,
         headers = M.headers(token),
     })
-    if err ~= nil then
-        error("HTTP request failed: " .. tostring(err))
-    end
     if not resp then
         error("HTTP request failed: empty response from " .. url)
     end
     local status = resp.status_code
-    if status == 401 or status == 403 then
-        local hosts = M.gh_hosts_for_api_url(url)
-        local host = hosts[#hosts]
-        local gh_hint = host and ("gh auth login --hostname " .. host) or "gh auth login"
-        error(
-            "GitHub Enterprise API returned "
-                .. tostring(status)
-                .. " (unauthorized/forbidden). Authenticate with gh ("
-                .. gh_hint
-                .. "), or set MISE_GITHUB_ENTERPRISE_TOKEN or MISE_GHE_TOKEN (Contents: read)."
-                .. " Environment tokens are only sent to the MISE_GHE_API_URL host or hosts in MISE_GHE_TOKEN_HOSTS"
-                .. " (see the README)."
-        )
-    end
-    if status == 404 then
-        error(
-            "GitHub Enterprise API returned 404 for "
-                .. url
-                .. ". Check org/repo and api_url (tool option api_url, MISE_GHE_API_URL, or GHE_API_URL)."
-        )
-    end
     if status < 200 or status >= 300 then
-        error(
-            "GitHub Enterprise API returned "
-                .. tostring(status)
-                .. ": "
-                .. truncate(resp.body, 500)
-        )
+        error(M.http_error_message(url, status, resp.headers, resp.body, token ~= nil))
     end
     local ok, data = pcall(json.decode, resp.body or "")
     if not ok then
@@ -803,6 +903,7 @@ function M.pick_asset(assets, options)
         end
         error(msg)
     end
+    log_debug("Selected asset " .. best.name .. " (score " .. tostring(best_score) .. ")")
     return best
 end
 
@@ -822,6 +923,7 @@ function M.find_release(releases, version)
                 table.insert(available, M.normalize_tag(tag))
             end
             if version_matches(rel.tag_name, version) or version_matches(rel.name, version) then
+                log_debug("Selected release " .. tostring(tag) .. " for version " .. tostring(version))
                 return rel
             end
         end
@@ -931,26 +1033,11 @@ function M.download_asset(asset, dest, token, api_url)
         error("Download URL host does not match api_url")
     end
     local headers = M.headers(from_api and token or nil, "application/octet-stream")
-    local err = http.download_file({ url = url, headers = headers }, dest)
-    if err ~= nil then
-        error("Download failed: " .. tostring(err))
-    end
+    log_debug("Downloading " .. tostring(asset.name) .. " from " .. url)
+    -- http.download_file raises on network and HTTP errors itself.
+    http.download_file({ url = url, headers = headers }, dest)
     if not file.exists(dest) then
         error("Download failed: file was not written")
-    end
-end
-
---- Create an installation or download directory without interpolating its path.
-function M.ensure_dir(path)
-    local file = require("file")
-    if file.exists(path) then
-        return
-    end
-    local cmd = require("cmd")
-    local command = is_windows() and 'mkdir "%MISE_GHE_DIR%"' or 'mkdir -p "$MISE_GHE_DIR"'
-    local ok, err = pcall(cmd.exec, command, { env = { MISE_GHE_DIR = path } })
-    if not ok and not file.exists(path) then
-        error("Failed to create directory: " .. tostring(err))
     end
 end
 
