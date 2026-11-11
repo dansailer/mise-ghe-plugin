@@ -121,8 +121,11 @@ Supported release assets: archives (`.tar.gz`/`.tgz`, `.tar.xz`/`.txz`, `.tar.bz
 | `api_url` | Override the GHE API root for one tool (use global `MISE_GHE_API_URL` instead when possible) |
 | `asset_pattern` / `matching` | Filter assets by substring, then pick by OS/arch score |
 | `bin` | Binary name for a non-archive asset (default: repo name) |
+| `prerelease` | `true` to list prereleases in `mise ls-remote` / `latest` (they can always be installed by exact version) |
 | `rename_exe` | Deprecated — use `bin` |
 | `token` | Per-tool token (use env vars instead) |
+
+Versions are the release tags with one leading `v`/`V` removed when a digit follows (`v1.2.3` → `1.2.3`; `jq-1.7.1` stays). Drafts are never listed, prereleases only with `prerelease = true`. `latest` is the release GitHub marks as *Latest*.
 
 ### Examples
 

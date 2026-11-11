@@ -28,6 +28,9 @@ end
 assert_eq(ghe.normalize_tag("v1.2.3"), "1.2.3", "strip v")
 assert_eq(ghe.normalize_tag("1.2.3-rc.1"), "1.2.3-rc.1", "keep prerelease")
 assert_eq(ghe.normalize_tag("release-1.2"), "release-1.2", "keep other prefix")
+assert_eq(ghe.normalize_tag("V2.0.0"), "2.0.0", "strip capital V")
+assert_eq(ghe.normalize_tag("version-1"), "version-1", "keep v not followed by a digit")
+assert_eq(ghe.normalize_tag("vnext"), "vnext", "keep v word")
 
 local owner, repo = ghe.parse_tool("org/repo")
 assert_eq(owner, "org", "parse owner")
@@ -696,6 +699,79 @@ end, "Unknown version", "draft not found")
 assert_err(function()
     ghe.find_release(releases, "0.0.1")
 end, "Unknown version", "missing version")
+
+do
+    -- Newest-first, as the API returns them: a 1.x backport published after 2.0.0.
+    local list = {
+        { tag_name = "v1.9.1", draft = false },
+        { tag_name = "v2.1.0-rc.1", draft = false, prerelease = true },
+        { tag_name = "v2.0.0", draft = false },
+        { tag_name = "v1.9.0", draft = false },
+    }
+    local v = ghe.versions_from_releases(list)
+    assert_eq(table.concat(v, ","), "1.9.0,2.0.0,1.9.1", "prerelease skipped by default")
+    v = ghe.versions_from_releases(list, true)
+    assert_eq(table.concat(v, ","), "1.9.0,2.0.0,2.1.0-rc.1,1.9.1", "prerelease included on request")
+    v = ghe.versions_from_releases(list, false, "v2.0.0")
+    assert_eq(table.concat(v, ","), "1.9.0,1.9.1,2.0.0", "GitHub latest release is last")
+    v = ghe.versions_from_releases(list, false, "v7.0.0")
+    assert_eq(v[#v], "1.9.1", "unknown latest tag is ignored")
+    -- Prereleases stay installable by exact version.
+    assert_eq(ghe.find_release(list, "2.1.0-rc.1").tag_name, "v2.1.0-rc.1", "find prerelease")
+
+    assert_eq(ghe.include_prereleases({ prerelease = true }), true, "prerelease option bool")
+    assert_eq(ghe.include_prereleases({ prerelease = "true" }), true, "prerelease option string")
+    assert_eq(ghe.include_prereleases({ prerelease = "false" }), false, "prerelease option false")
+    assert_eq(ghe.include_prereleases({}), false, "prerelease default")
+end
+
+do
+    local saved_http = package.loaded.http
+    local saved_json = package.loaded.json
+    local requested = {}
+    local responses = {}
+    package.loaded.json = {
+        decode = function(body)
+            return responses.decoded[body]
+        end,
+    }
+    package.loaded.http = {
+        get = function(req)
+            table.insert(requested, req.url)
+            local r = responses[req.url]
+            if r then
+                return { status_code = 200, body = r, headers = {} }
+            end
+            return { status_code = 404, body = "nf", headers = {} }
+        end,
+    }
+    local api = "https://ghe.example/api/v3"
+    local tag_rel = { tag_name = "v3.0.0", draft = false, assets = {} }
+    responses.decoded = {
+        tagrel = tag_rel,
+        latest = { tag_name = "v2.0.0" },
+        list = { { tag_name = "only-by-name", name = "4.0.0", draft = false, assets = {} } },
+    }
+    responses[api .. "/repos/org/tool/releases/tags/v3.0.0"] = "tagrel"
+    responses[api .. "/repos/org/tool/releases/latest"] = "latest"
+    responses[api .. "/repos/org/tool/releases?per_page=100&page=1"] = "list"
+
+    local got = ghe.get_release(api, "org", "tool", "3.0.0", nil)
+    assert_eq(got, tag_rel, "get_release via tags endpoint")
+    assert_eq(#requested, 2, "tries the version, then v-prefixed tag, no listing")
+    assert_eq(requested[2], api .. "/repos/org/tool/releases/tags/v3.0.0", "v-prefixed tag url")
+
+    requested = {}
+    got = ghe.get_release(api, "org", "tool", "4.0.0", nil)
+    assert_eq(got.name, "4.0.0", "get_release falls back to the release list")
+    assert_eq(requested[#requested], api .. "/repos/org/tool/releases?per_page=100&page=1", "list fallback url")
+
+    assert_eq(ghe.latest_release_tag(api, "org", "tool", nil), "v2.0.0", "latest tag")
+    assert_eq(ghe.latest_release_tag(api, "org", "other", nil), nil, "no latest release is nil")
+
+    package.loaded.http = saved_http
+    package.loaded.json = saved_json
+end
 
 local asset = ghe.pick_asset(releases[1].assets, {})
 assert_eq(asset.name, "tool-linux-amd64.tar.gz", "pick linux")
