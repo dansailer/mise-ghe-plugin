@@ -497,13 +497,13 @@ function M.token(options, api_url)
 end
 
 --- Normalize a backend tool name and return its owner and repository.
--- Extra path components are ignored for compatibility with mise tool names.
+-- Anything other than exactly owner/repo is an error, so typos surface.
 function M.parse_tool(tool)
     if type(tool) ~= "string" then
         error("Tool name must be owner/repo")
     end
     tool = trim(tool):gsub("^/+", ""):gsub("/+$", "")
-    local owner, repo = tool:match("^([^/]+)/([^/]+)")
+    local owner, repo = tool:match("^([^/]+)/([^/]+)$")
     if not owner or not repo then
         error("Tool name must be owner/repo, got: " .. tool)
     end
