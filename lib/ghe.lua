@@ -5,34 +5,86 @@
 
 local M = {}
 
--- Name fragments used to match release assets to the target platform.
-local OS_NEEDLES = {
-    darwin = { "darwin", "macos", "osx", "apple", "mac" },
+-- Release asset names are matched by whole tokens (see name_tokens), never by
+-- raw substrings: a substring match lets "win" hit "darwin" or "386" hit a
+-- version number. Each OS group lists the tokens that identify it.
+local OS_TOKENS = {
+    darwin = { "darwin", "macos", "macosx", "osx", "apple", "mac" },
     linux = { "linux" },
-    windows = { "windows", "win", "pc-windows" },
+    windows = { "windows", "win", "win32", "win64", "exe" },
+    -- Recognised only so their assets are rejected as foreign.
+    freebsd = { "freebsd" },
+    openbsd = { "openbsd" },
+    netbsd = { "netbsd" },
+    android = { "android" },
+    illumos = { "illumos" },
+    solaris = { "solaris" },
+    aix = { "aix" },
 }
 
-local X86_64_NEEDLES = { "x64", "amd64", "x86_64", "x86-64" }
-local ARM64_NEEDLES = { "arm64", "aarch64" }
-local X86_NEEDLES = { "x86", "i386", "i686", "386" }
-
--- Keyed by the RUNTIME.archType values mise reports.
-local ARCH_NEEDLES = {
-    x64 = X86_64_NEEDLES,
-    amd64 = X86_64_NEEDLES,
-    x86_64 = X86_64_NEEDLES,
-    arm64 = ARM64_NEEDLES,
-    aarch64 = ARM64_NEEDLES,
-    x86 = X86_NEEDLES,
-    ["386"] = X86_NEEDLES,
+-- Architecture groups by token. Groups other than the current one are foreign.
+local ARCH_TOKENS = {
+    amd64 = { "amd64", "x64", "x86_64" },
+    arm64 = { "arm64", "aarch64", "armv8", "arm64e" },
+    x86 = { "x86", "386", "i386", "i586", "i686", "ia32" },
+    arm = { "arm", "armv5", "armv6", "armv6l", "armv7", "armv7l", "armv7a", "armhf", "armel", "arm32" },
+    riscv64 = { "riscv64" },
+    ppc64le = { "ppc64le", "ppc64el", "powerpc64le" },
+    ppc64 = { "ppc64", "powerpc64", "powerpc" },
+    s390x = { "s390x" },
+    mips = { "mips", "mipsel", "mipsle", "mipsr6", "mipsr6el" },
+    mips64 = { "mips64", "mips64el", "mips64le", "mips64r6", "mips64r6el" },
+    loong64 = { "loong64", "loongarch64" },
 }
+
+-- Maps RUNTIME.archType values mise reports to an ARCH_TOKENS group.
+local RUNTIME_ARCH = {
+    x64 = "amd64",
+    amd64 = "amd64",
+    x86_64 = "amd64",
+    arm64 = "arm64",
+    aarch64 = "arm64",
+    x86 = "x86",
+    ["386"] = "x86",
+    i386 = "x86",
+    i686 = "x86",
+    arm = "arm",
+    armv7 = "arm",
+    riscv64 = "riscv64",
+    ppc64le = "ppc64le",
+    s390x = "s390x",
+    loong64 = "loong64",
+}
+
+-- Foreign architectures the OS runs through emulation (Rosetta 2, Windows on
+-- Arm x64 emulation). Values are architecture scores, below native (50) and
+-- universal (45), so emulation is used only when no better asset exists.
+local EMULATED_ARCH = {
+    darwin = { arm64 = { amd64 = 20 } },
+    windows = { arm64 = { amd64 = 20, x86 = 15 } },
+}
+
+-- Tokens marking a binary that runs on every architecture of its OS.
+local UNIVERSAL_TOKENS = { "universal", "universal2" }
 
 -- Suffixes identifying metadata sidecars and extractable archives.
-local SIDECAR_SUFFIXES = { ".sha256", ".sha256sum", ".asc", ".sig", ".json", ".sbom" }
+local SIDECAR_SUFFIXES = {
+    ".sha256", ".sha256sum", ".sha512", ".sha512sum", ".sha1", ".md5", ".b3",
+    ".asc", ".sig", ".minisig", ".pem", ".crt", ".cert", ".pub", ".sigstore", ".intoto.jsonl",
+    ".json", ".txt", ".sbom", ".spdx", ".cdx",
+}
 local ARCHIVE_SUFFIXES = { ".tar.gz", ".tgz", ".tar.xz", ".tar.bz2", ".zip", ".tar" }
 
--- Name fragments that mark an asset as unlikely to be the wanted binary.
-local PENALIZED_FRAGMENTS = { "debug", "test", "sha256", ".sbom" }
+-- OS installer packages; this plugin cannot install them, so they are never selected.
+local PACKAGE_SUFFIXES = {
+    ".deb", ".rpm", ".apk", ".pkg", ".dmg", ".msi", ".msix", ".appx", ".snap", ".flatpak", ".nupkg",
+}
+
+-- Suffixes removed before tokenizing so "amd64.tar.gz" yields the token "amd64".
+local STRIP_SUFFIXES = { ".tar", ".gz", ".tgz", ".xz", ".txz", ".bz2", ".tbz2", ".zst", ".zip", ".7z", ".exe" }
+
+-- Name tokens that mark an asset as unlikely to be the wanted binary.
+local PENALIZED_TOKENS = { "debug", "dbg", "test", "tests", "symbols" }
 
 -- Trim optional configuration values before they are validated or compared.
 local function trim(s)
@@ -84,9 +136,22 @@ local function is_https(url)
     return type(url) == "string" and url:sub(1, 8):lower() == "https://"
 end
 
--- Sidecar files are metadata, not installable release binaries.
+-- Sidecar files are metadata, not installable release binaries. Besides the
+-- suffix list this catches extension-less checksum files such as SHA256SUMS.
 local function is_sidecar(name)
-    return any_suffix(name:lower(), SIDECAR_SUFFIXES)
+    local lower = name:lower()
+    if any_suffix(lower, SIDECAR_SUFFIXES) then
+        return true
+    end
+    local base = lower:match("([^/]*)$")
+    return base:match("^sha%d*sums?$") ~= nil
+        or base:match("^md5sums?$") ~= nil
+        or base:match("checksums?$") ~= nil
+end
+
+-- OS installer packages (.deb, .msi, ...) are not installable by this plugin.
+local function is_package(name)
+    return any_suffix(name:lower(), PACKAGE_SUFFIXES)
 end
 
 -- Escape an owner or repository component for a URL path.
@@ -567,101 +632,176 @@ local function version_matches(field, version)
     return field == version or nf == version or nf == M.normalize_tag(version)
 end
 
--- Return OS and architecture aliases used by release asset matching.
-local function os_arch()
-    local os_type = (RUNTIME.osType or ""):lower()
-    local arch_type = (RUNTIME.archType or ""):lower()
-    return OS_NEEDLES[os_type] or { os_type }, ARCH_NEEDLES[arch_type] or { arch_type }
+-- Split a release asset name into a set of lowercased tokens. Spellings that
+-- contain separators are normalized first (x86_64 -> amd64, linux64 ->
+-- linux amd64), packaging suffixes are dropped, and dotted parts such as
+-- "darwin.arm64" are split unless they are purely numeric (version numbers).
+function M.name_tokens(name)
+    local lower = name:lower()
+    local set = {}
+    if ends_with(lower, ".exe") then
+        set.exe = true
+    end
+    local stripped = true
+    while stripped do
+        stripped = false
+        for _, suffix in ipairs(STRIP_SUFFIXES) do
+            if #lower > #suffix and ends_with(lower, suffix) then
+                lower = lower:sub(1, -#suffix - 1)
+                stripped = true
+                break
+            end
+        end
+    end
+    -- %f frontiers keep these to whole words ("darwin64" is not "win64").
+    lower = lower
+        :gsub("%f[%w]x86[_%-]64%f[%W]", "amd64")
+        :gsub("%f[%w]linux64%f[%W]", "linux-amd64")
+        :gsub("%f[%w]linux32%f[%W]", "linux-x86")
+        :gsub("%f[%w]win64%f[%W]", "windows-amd64")
+    for token in lower:gmatch("[%w%.]+") do
+        set[token] = true
+        if token:find(".", 1, true) then
+            for part in token:gmatch("[%w]+") do
+                if part:find("%a") then
+                    set[part] = true
+                end
+            end
+        end
+    end
+    return set
 end
 
--- Test whether an asset name contains any platform alias.
-local function any_needle(name, needles)
-    for _, needle in ipairs(needles) do
-        if needle ~= "" and contains(name, needle) then
+-- Test whether a token set contains any token from a list.
+local function has_token(tokens, list)
+    for _, token in ipairs(list) do
+        if tokens[token] then
             return true
         end
     end
     return false
 end
 
--- Detect an asset explicitly labeled for an OS other than the current one.
-local function foreign_os_present(name, os_aliases)
-    local current = {}
-    for _, needle in ipairs(os_aliases) do
-        current[needle] = true
-    end
-    for _, group in pairs(OS_NEEDLES) do
-        for _, needle in ipairs(group) do
-            if not current[needle] and contains(name, needle) then
-                return true
-            end
-        end
-    end
-    return false
+-- Return the current OS name and architecture group from RUNTIME.
+local function platform()
+    local os_type = (RUNTIME.osType or ""):lower()
+    local arch_type = (RUNTIME.archType or ""):lower()
+    return os_type, RUNTIME_ARCH[arch_type] or arch_type
 end
 
--- Score a lowercased asset name for the current OS and architecture.
--- Native, matching, non-debug archives score higher; sidecar-like names score lower.
-local function score_asset(name, os_aliases, arch_aliases)
-    local score = 0
-    if any_needle(name, os_aliases) then
-        score = score + 100
-    elseif foreign_os_present(name, os_aliases) then
-        score = score - 50
+-- Classify an asset's OS tokens: "foreign" when any other OS is named,
+-- otherwise "native" when the current OS is named, otherwise "none".
+local function os_match(tokens, os_type)
+    for name, list in pairs(OS_TOKENS) do
+        if name ~= os_type and has_token(tokens, list) then
+            return "foreign"
+        end
     end
-    if any_needle(name, arch_aliases) then
-        score = score + 50
+    local native = OS_TOKENS[os_type] or { os_type }
+    if has_token(tokens, native) then
+        return "native"
     end
-    if contains(name, "musl") then
+    return "none"
+end
+
+-- Classify an asset's architecture tokens: "native", "universal", "emulated",
+-- "foreign", or "none". The second result is the architecture score.
+local function arch_match(tokens, os_type, arch_group)
+    if has_token(tokens, ARCH_TOKENS[arch_group] or { arch_group }) then
+        return "native", 50
+    end
+    local foreign_group = nil
+    for name, list in pairs(ARCH_TOKENS) do
+        if name ~= arch_group and has_token(tokens, list) then
+            foreign_group = name
+            break
+        end
+    end
+    if foreign_group then
+        local emulated = EMULATED_ARCH[os_type] and EMULATED_ARCH[os_type][arch_group]
+        if emulated and emulated[foreign_group] then
+            return "emulated", emulated[foreign_group]
+        end
+        return "foreign", -100
+    end
+    if has_token(tokens, UNIVERSAL_TOKENS) or (os_type == "darwin" and tokens.all) then
+        return "universal", 45
+    end
+    return "none", 0
+end
+
+local OS_SCORE = { native = 100, none = 0, foreign = -100 }
+
+-- Score an asset name for the current platform. Returns the score and whether
+-- the asset is acceptable without an explicit asset_pattern: it must not be
+-- labelled for another OS or architecture, and must match the OS or the
+-- architecture (natively, universally, or via emulation).
+local function score_asset(name, os_type, arch_group)
+    local tokens = M.name_tokens(name)
+    local os_kind = os_match(tokens, os_type)
+    local arch_kind, arch_score = arch_match(tokens, os_type, arch_group)
+    local score = OS_SCORE[os_kind] + arch_score
+    if tokens.musl then
         score = score - 5
     end
-    for _, fragment in ipairs(PENALIZED_FRAGMENTS) do
-        if contains(name, fragment) then
-            score = score - 40
-        end
+    if os_type == "windows" and tokens.msvc then
+        score = score + 3
+    end
+    if has_token(tokens, PENALIZED_TOKENS) then
+        score = score - 40
     end
     if any_suffix(name, ARCHIVE_SUFFIXES) then
         score = score + 10
     end
-    if any_suffix(name, SIDECAR_SUFFIXES) then
-        score = score - 80
-    end
-    return score
+    local acceptable = os_kind ~= "foreign"
+        and arch_kind ~= "foreign"
+        and (os_kind == "native" or arch_kind ~= "none")
+    return score, acceptable
 end
 
 --- Select the best release asset for the current platform.
--- An explicit asset_pattern/matching option permits intentionally foreign assets.
+-- Checksum/signature sidecars and OS packages are never selected. Without an
+-- asset_pattern/matching option, assets labelled for another OS or
+-- architecture are rejected; an explicit pattern permits them.
 function M.pick_asset(assets, options)
     options = options or {}
-    local os_aliases, arch_aliases = os_arch()
+    local os_type, arch_group = platform()
     local pattern = option_string(options, "asset_pattern") or option_string(options, "matching")
     if pattern ~= nil then
         pattern = pattern:lower()
     end
     local names = {}
+    local skipped_package = false
     local best, best_score = nil, nil
     for _, asset in ipairs(assets or {}) do
         local name = asset.name
         if type(name) == "string" and name ~= "" then
             table.insert(names, name)
             local lower = name:lower()
-            if (not is_sidecar(lower)) and (pattern == nil or pattern == "" or contains(lower, pattern)) then
-                local score = score_asset(lower, os_aliases, arch_aliases)
-                local acceptable = pattern ~= nil
-                    or (
-                        score > 0
-                        and not foreign_os_present(lower, os_aliases)
-                        and (any_needle(lower, os_aliases) or any_needle(lower, arch_aliases))
-                    )
-                if acceptable and (best_score == nil or score > best_score) then
-                    best = asset
-                    best_score = score
+            if pattern == nil or contains(lower, pattern) then
+                if is_package(lower) then
+                    skipped_package = true
+                elseif not is_sidecar(lower) then
+                    local score, acceptable = score_asset(lower, os_type, arch_group)
+                    if (pattern ~= nil or acceptable) and (best_score == nil or score > best_score) then
+                        best = asset
+                        best_score = score
+                    end
                 end
             end
         end
     end
     if not best then
-        error("No matching release asset for this platform. Available assets: " .. list_for_error(names))
+        local msg = "No matching release asset for this platform ("
+            .. tostring(RUNTIME.osType)
+            .. "/"
+            .. tostring(RUNTIME.archType)
+            .. "). Available assets: "
+            .. list_for_error(names)
+        if skipped_package then
+            msg = msg .. ". OS packages (.deb, .rpm, .msi, .pkg, ...) cannot be installed by this plugin"
+        end
+        error(msg)
     end
     return best
 end
@@ -713,12 +853,50 @@ function M.versions_from_releases(releases)
     return result
 end
 
+-- How the installer handles each asset suffix, longest suffixes first.
+-- mise's archiver only extracts names ending (case-sensitively) in .tar.gz,
+-- .tar.xz, .tar.bz2 or .zip, so aliases such as .tgz are renamed to the
+-- canonical suffix first. Other tarballs go through the system tar, and
+-- single compressed binaries through the matching decompressor.
+local ASSET_FORMATS = {
+    { suffix = ".tar.gz", kind = "archiver", ext = ".tar.gz" },
+    { suffix = ".tar.xz", kind = "archiver", ext = ".tar.xz" },
+    { suffix = ".tar.bz2", kind = "archiver", ext = ".tar.bz2" },
+    { suffix = ".tar.zst", kind = "tar" },
+    { suffix = ".tgz", kind = "archiver", ext = ".tar.gz" },
+    { suffix = ".txz", kind = "archiver", ext = ".tar.xz" },
+    { suffix = ".tbz2", kind = "archiver", ext = ".tar.bz2" },
+    { suffix = ".tbz", kind = "archiver", ext = ".tar.bz2" },
+    { suffix = ".tzst", kind = "tar" },
+    { suffix = ".zip", kind = "archiver", ext = ".zip" },
+    { suffix = ".tar", kind = "tar" },
+    { suffix = ".gz", kind = "compressed", tool = "gzip" },
+    { suffix = ".xz", kind = "compressed", tool = "xz" },
+    { suffix = ".bz2", kind = "compressed", tool = "bzip2" },
+    { suffix = ".zst", kind = "compressed", tool = "zstd" },
+    { suffix = ".7z", kind = "unsupported" },
+    { suffix = ".rar", kind = "unsupported" },
+}
+
+--- Return how an asset is installed: a table with `suffix` and `kind`
+-- ("archiver", "tar", "compressed" or "unsupported"), or nil for a raw binary.
+function M.asset_format(name)
+    if type(name) ~= "string" then
+        return nil
+    end
+    local lower = name:lower()
+    for _, format in ipairs(ASSET_FORMATS) do
+        if #lower > #format.suffix and ends_with(lower, format.suffix) then
+            return format
+        end
+    end
+    return nil
+end
+
 --- Identify archive formats that the installer knows how to extract.
 function M.is_archive(name)
-    if type(name) ~= "string" then
-        return false
-    end
-    return any_suffix(name:lower(), ARCHIVE_SUFFIXES)
+    local format = M.asset_format(name)
+    return format ~= nil and (format.kind == "archiver" or format.kind == "tar")
 end
 
 --- Strip path components from an asset name and reject unusable filenames.
@@ -774,6 +952,97 @@ function M.ensure_dir(path)
     if not ok and not file.exists(path) then
         error("Failed to create directory: " .. tostring(err))
     end
+end
+
+-- Extract a tarball mise's archiver cannot read (.tar, .tar.zst) with the
+-- system tar (bsdtar on Windows 10+). Like the archiver's strip_components = 1,
+-- a single top-level directory is stripped; root-level files are kept.
+local function extract_with_tar(archive, dest)
+    local cmd = require("cmd")
+    local env = { MISE_GHE_ARCHIVE = archive, MISE_GHE_DEST = dest }
+    local list_cmd = is_windows() and 'tar -tf "%MISE_GHE_ARCHIVE%"' or 'tar -tf "$MISE_GHE_ARCHIVE"'
+    local ok, listing = pcall(cmd.exec, list_cmd, { env = env })
+    if not ok then
+        local hint = " with tar (is tar, and zstd for .zst, on PATH?): "
+        error("Failed to read " .. archive .. hint .. tostring(listing))
+    end
+    local top, strip = nil, true
+    for entry in tostring(listing):gmatch("[^\r\n]+") do
+        entry = entry:gsub("^%./", "")
+        if entry ~= "" and entry ~= "." then
+            local first = entry:match("^([^/]+)/")
+            if not first or (top and first ~= top) then
+                strip = false
+                break
+            end
+            top = first
+        end
+    end
+    strip = strip and top ~= nil
+    local flags = strip and " --strip-components=1" or ""
+    local extract_cmd = is_windows() and ('tar -xf "%MISE_GHE_ARCHIVE%" -C "%MISE_GHE_DEST%"' .. flags)
+        or ('tar -xf "$MISE_GHE_ARCHIVE" -C "$MISE_GHE_DEST"' .. flags)
+    local extracted, err = pcall(cmd.exec, extract_cmd, { env = env })
+    if not extracted then
+        error("Failed to extract " .. archive .. " with tar: " .. tostring(err))
+    end
+end
+
+-- Decompress a single compressed binary (.gz, .xz, .bz2, .zst) to dest.
+local function decompress_single(format, source, dest)
+    if is_windows() then
+        error(
+            "Single-file "
+                .. format.suffix
+                .. " assets are not supported on Windows. Set asset_pattern to select a .zip or .exe asset."
+        )
+    end
+    local cmd = require("cmd")
+    local command = format.tool .. ' -dc "$MISE_GHE_SOURCE" > "$MISE_GHE_DEST"'
+    local ok, err = pcall(cmd.exec, command, { env = { MISE_GHE_SOURCE = source, MISE_GHE_DEST = dest } })
+    if not ok then
+        error("Failed to decompress " .. source .. " (is " .. format.tool .. " installed?): " .. tostring(err))
+    end
+end
+
+--- Install a downloaded asset into install_path according to its format.
+-- Archives are extracted (stripping one top-level directory); single
+-- compressed binaries are decompressed and raw binaries moved, both to the
+-- name from bin_name() and marked executable.
+function M.install_asset(path, install_path, options, repo)
+    local file = require("file")
+    local format = M.asset_format(path)
+    if format and format.kind == "unsupported" then
+        error(
+            "Unsupported asset format "
+                .. format.suffix
+                .. ": "
+                .. path
+                .. ". Supported: .tar.gz/.tgz, .tar.xz/.txz, .tar.bz2/.tbz2, .zip, .tar, .tar.zst,"
+                .. " single .gz/.xz/.bz2/.zst files and raw binaries. Set asset_pattern to choose another asset."
+        )
+    end
+    if format and format.kind == "archiver" then
+        local archive = path
+        local canonical = file.join_path(parent_dir(path) or ".", "mise-ghe-asset" .. format.ext)
+        if canonical ~= path then
+            file.move(path, canonical)
+            archive = canonical
+        end
+        require("archiver").decompress(archive, install_path, { strip_components = 1 })
+        return
+    end
+    if format and format.kind == "tar" then
+        extract_with_tar(path, install_path)
+        return
+    end
+    local dest = file.join_path(install_path, M.bin_name(options, repo))
+    if format and format.kind == "compressed" then
+        decompress_single(format, path, dest)
+    else
+        file.move(path, dest)
+    end
+    M.chmod_x(dest)
 end
 
 --- Mark an installed non-Windows binary executable.

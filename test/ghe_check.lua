@@ -309,10 +309,303 @@ assert_eq(ghe.pick_asset({ linux_asset, musl_asset }, {}).name, "tool-linux-amd6
 assert_eq(ghe.pick_asset({ linux_asset, win_asset },  {}).name, "tool-linux-amd64.tar.gz", "prefer native OS")
 assert_eq(ghe.pick_asset({ linux_asset, sum_asset },  {}).name, "tool-linux-amd64.tar.gz", "prefer archive over checksum")
 
+-- Platform-aware asset selection (#4, #5). pick_asset reads RUNTIME on each call.
+local function names_to_assets(text)
+    local list = {}
+    for name in text:gmatch("%S+") do
+        list[#list + 1] = { name = name }
+    end
+    return list
+end
+
+local function pick_on(os_type, arch_type, assets, opts)
+    local saved = RUNTIME
+    RUNTIME = { osType = os_type, archType = arch_type }
+    local ok, res = pcall(ghe.pick_asset, assets, opts or {})
+    RUNTIME = saved
+    if not ok then
+        error(res, 0)
+    end
+    return res.name
+end
+
+local RIPGREP = names_to_assets([[
+ripgrep-14.1.1-aarch64-apple-darwin.tar.gz ripgrep-14.1.1-aarch64-apple-darwin.tar.gz.sha256
+ripgrep-14.1.1-aarch64-unknown-linux-gnu.tar.gz ripgrep-14.1.1-aarch64-unknown-linux-gnu.tar.gz.sha256
+ripgrep-14.1.1-armv7-unknown-linux-gnueabihf.tar.gz ripgrep-14.1.1-armv7-unknown-linux-musleabi.tar.gz
+ripgrep-14.1.1-i686-pc-windows-msvc.zip ripgrep-14.1.1-i686-unknown-linux-gnu.tar.gz
+ripgrep-14.1.1-powerpc64-unknown-linux-gnu.tar.gz ripgrep-14.1.1-s390x-unknown-linux-gnu.tar.gz
+ripgrep-14.1.1-x86_64-apple-darwin.tar.gz ripgrep-14.1.1-x86_64-pc-windows-gnu.zip
+ripgrep-14.1.1-x86_64-pc-windows-msvc.zip ripgrep-14.1.1-x86_64-unknown-linux-musl.tar.gz
+ripgrep-14.1.1-x86_64-unknown-linux-musl.tar.gz.sha256 ripgrep_14.1.1-1_amd64.deb ripgrep_14.1.1-1_amd64.deb.sha256
+]])
+local GH = names_to_assets([[
+gh_2.63.0_checksums.txt gh_2.63.0_linux_386.deb gh_2.63.0_linux_386.rpm gh_2.63.0_linux_386.tar.gz
+gh_2.63.0_linux_amd64.deb gh_2.63.0_linux_amd64.rpm gh_2.63.0_linux_amd64.tar.gz gh_2.63.0_linux_arm64.deb
+gh_2.63.0_linux_arm64.rpm gh_2.63.0_linux_arm64.tar.gz gh_2.63.0_linux_armv6.deb gh_2.63.0_linux_armv6.rpm
+gh_2.63.0_linux_armv6.tar.gz gh_2.63.0_macOS_amd64.zip gh_2.63.0_macOS_arm64.zip gh_2.63.0_macOS_universal.pkg
+gh_2.63.0_windows_386.msi gh_2.63.0_windows_386.zip gh_2.63.0_windows_amd64.msi gh_2.63.0_windows_amd64.zip
+gh_2.63.0_windows_arm64.zip
+]])
+local JQ = names_to_assets([[
+jq-1.7.1.tar.gz jq-1.7.1.zip jq-linux-amd64 jq-linux-arm64 jq-linux-armel jq-linux-armhf jq-linux-i386
+jq-linux-mips jq-linux-mips64 jq-linux-mips64el jq-linux-mips64r6 jq-linux-mips64r6el jq-linux-mipsel
+jq-linux-mipsr6 jq-linux-mipsr6el jq-linux-powerpc jq-linux-ppc64el jq-linux-riscv64 jq-linux-s390x jq-linux64
+jq-macos-amd64 jq-macos-arm64 jq-osx-amd64 jq-win64.exe jq-windows-amd64.exe jq-windows-i386.exe sha256sum.txt
+]])
+local FZF = names_to_assets([[
+fzf-0.56.3-darwin_amd64.tar.gz fzf-0.56.3-darwin_arm64.tar.gz fzf-0.56.3-freebsd_amd64.tar.gz
+fzf-0.56.3-linux_amd64.tar.gz fzf-0.56.3-linux_arm64.tar.gz fzf-0.56.3-linux_armv5.tar.gz
+fzf-0.56.3-linux_armv6.tar.gz fzf-0.56.3-linux_armv7.tar.gz fzf-0.56.3-linux_loong64.tar.gz
+fzf-0.56.3-linux_ppc64le.tar.gz fzf-0.56.3-linux_s390x.tar.gz fzf-0.56.3-openbsd_amd64.tar.gz
+fzf-0.56.3-windows_amd64.zip fzf-0.56.3-windows_arm64.zip fzf-0.56.3-windows_armv5.zip
+fzf-0.56.3-windows_armv6.zip fzf-0.56.3-windows_armv7.zip fzf_0.56.3_checksums.txt
+]])
+
+-- { assets, os, arch, expected asset (or false for "no match") }
+local PLATFORM_CASES = {
+    { RIPGREP, "linux", "amd64", "ripgrep-14.1.1-x86_64-unknown-linux-musl.tar.gz" },
+    { RIPGREP, "linux", "arm64", "ripgrep-14.1.1-aarch64-unknown-linux-gnu.tar.gz" },
+    { RIPGREP, "linux", "386", "ripgrep-14.1.1-i686-unknown-linux-gnu.tar.gz" },
+    { RIPGREP, "darwin", "arm64", "ripgrep-14.1.1-aarch64-apple-darwin.tar.gz" },
+    { RIPGREP, "darwin", "amd64", "ripgrep-14.1.1-x86_64-apple-darwin.tar.gz" },
+    { RIPGREP, "windows", "amd64", "ripgrep-14.1.1-x86_64-pc-windows-msvc.zip" },
+    { RIPGREP, "windows", "arm64", "ripgrep-14.1.1-x86_64-pc-windows-msvc.zip" },
+    { GH, "linux", "amd64", "gh_2.63.0_linux_amd64.tar.gz" },
+    { GH, "linux", "arm64", "gh_2.63.0_linux_arm64.tar.gz" },
+    { GH, "linux", "386", "gh_2.63.0_linux_386.tar.gz" },
+    { GH, "darwin", "arm64", "gh_2.63.0_macOS_arm64.zip" },
+    { GH, "darwin", "amd64", "gh_2.63.0_macOS_amd64.zip" },
+    { GH, "windows", "amd64", "gh_2.63.0_windows_amd64.zip" },
+    { GH, "windows", "arm64", "gh_2.63.0_windows_arm64.zip" },
+    { JQ, "linux", "amd64", "jq-linux-amd64" },
+    { JQ, "linux", "arm64", "jq-linux-arm64" },
+    { JQ, "linux", "386", "jq-linux-i386" },
+    { JQ, "darwin", "arm64", "jq-macos-arm64" },
+    { JQ, "darwin", "amd64", "jq-macos-amd64" },
+    { JQ, "windows", "amd64", "jq-win64.exe" },
+    { FZF, "linux", "amd64", "fzf-0.56.3-linux_amd64.tar.gz" },
+    { FZF, "linux", "arm64", "fzf-0.56.3-linux_arm64.tar.gz" },
+    { FZF, "linux", "386", false },
+    { FZF, "darwin", "arm64", "fzf-0.56.3-darwin_arm64.tar.gz" },
+    { FZF, "darwin", "amd64", "fzf-0.56.3-darwin_amd64.tar.gz" },
+    { FZF, "windows", "amd64", "fzf-0.56.3-windows_amd64.zip" },
+    { FZF, "windows", "arm64", "fzf-0.56.3-windows_arm64.zip" },
+}
+for i, case in ipairs(PLATFORM_CASES) do
+    local label = "platform case " .. i .. " (" .. case[2] .. "/" .. case[3] .. ")"
+    if case[4] then
+        assert_eq(pick_on(case[2], case[3], case[1]), case[4], label)
+    else
+        assert_err(function()
+            pick_on(case[2], case[3], case[1])
+        end, "No matching release asset", label)
+    end
+end
+
+-- #4: "win" must not match inside "darwin".
+assert_eq(ghe.name_tokens("tool-darwin-arm64.tar.gz").win, nil, "no win token in darwin")
+assert_eq(pick_on("darwin", "arm64", names_to_assets("tool-darwin-arm64.tar.gz")), "tool-darwin-arm64.tar.gz", "darwin")
+assert_eq(
+    pick_on("darwin", "amd64", names_to_assets("tool_Darwin_x86_64.tar.gz")),
+    "tool_Darwin_x86_64.tar.gz",
+    "Darwin x86_64"
+)
+assert_eq(
+    pick_on("windows", "amd64", names_to_assets("tool-darwin-amd64.tar.gz tool-win64.zip")),
+    "tool-win64.zip",
+    "win64 on windows"
+)
+for _, os_type in ipairs({ "linux", "darwin" }) do
+    assert_err(function()
+        pick_on(os_type, "amd64", names_to_assets("tool-x86_64-pc-windows-msvc.zip tool-win64.zip"))
+    end, "No matching release asset", "windows assets rejected on " .. os_type)
+end
+
+-- #5: wrong architecture is rejected rather than installed silently.
+assert_err(function()
+    pick_on("linux", "amd64", names_to_assets("tool-linux-arm64.tar.gz"))
+end, "tool-linux-arm64.tar.gz", "foreign arch rejected, assets listed")
+assert_err(function()
+    pick_on("linux", "386", names_to_assets("tool-linux-x86_64.tar.gz"))
+end, "No matching release asset", "x86_64 is not 386")
+assert_eq(
+    pick_on("linux", "amd64", names_to_assets("tool-linux-arm64.tar.gz"), { asset_pattern = "arm64" }),
+    "tool-linux-arm64.tar.gz",
+    "explicit pattern still allows a foreign arch"
+)
+-- Emulation and universal binaries.
+assert_eq(
+    pick_on("darwin", "arm64", names_to_assets("tool-darwin-amd64.tar.gz")),
+    "tool-darwin-amd64.tar.gz",
+    "Rosetta fallback"
+)
+assert_eq(
+    pick_on("darwin", "arm64", names_to_assets("tool-darwin-amd64.tar.gz tool-darwin-universal.tar.gz")),
+    "tool-darwin-universal.tar.gz",
+    "universal beats emulation"
+)
+assert_eq(pick_on("darwin", "amd64", names_to_assets("tool_darwin_all.tar.gz")), "tool_darwin_all.tar.gz", "darwin_all")
+-- OS packages are never auto-selected, and a pattern selecting only packages explains why.
+for _, pkg in ipairs({
+    "tool-linux-amd64.deb",
+    "tool-linux-amd64.rpm",
+    "tool-windows-amd64.msi",
+    "tool-darwin-arm64.dmg",
+}) do
+    local os_type = pkg:match("%-(%a+)%-")
+    local arch = pkg:match("%-(%w+)%.%a+$")
+    assert_err(function()
+        pick_on(os_type, arch, names_to_assets(pkg))
+    end, "OS packages", "package not selected: " .. pkg)
+end
+assert_err(function()
+    pick_on("linux", "amd64", names_to_assets("tool-linux-amd64.deb"), { asset_pattern = ".deb" })
+end, "OS packages", "pattern selecting a package errors")
+assert_eq(
+    pick_on("linux", "amd64", names_to_assets("tool_1.0_amd64.deb tool-linux-amd64.tar.gz")),
+    "tool-linux-amd64.tar.gz",
+    "archive over deb"
+)
+-- Sidecars are never selected.
+for _, sidecar in ipairs({
+    "tool-linux-amd64.tar.gz.sha512",
+    "tool-linux-amd64.tar.gz.intoto.jsonl",
+    "tool-linux-amd64.tar.gz.pem",
+    "tool-linux-amd64.sbom.json",
+    "checksums.txt",
+    "SHA256SUMS",
+}) do
+    assert_err(function()
+        pick_on("linux", "amd64", { { name = sidecar } })
+    end, "No matching release asset", "sidecar skipped: " .. sidecar)
+end
+-- "test" penalises the token, not substrings such as "latest".
+assert_eq(
+    pick_on("linux", "amd64", names_to_assets("tool-tests-linux-amd64.tar.gz tool-latest-linux-amd64.tar.gz")),
+    "tool-latest-linux-amd64.tar.gz",
+    "latest is not penalised"
+)
+
 assert_eq(ghe.is_archive("a.tar.gz"), true, "tar.gz")
 assert_eq(ghe.is_archive("a.tgz"), true, "tgz")
 assert_eq(ghe.is_archive("a.zip"), true, "zip")
 assert_eq(ghe.is_archive("a"), false, "plain binary")
+
+-- Asset formats and installation (#6).
+assert_eq(ghe.is_archive("A.TAR.GZ"), true, "upper-case tar.gz")
+assert_eq(ghe.is_archive("a.tar"), true, "tar")
+assert_eq(ghe.is_archive("a.tar.zst"), true, "tar.zst")
+assert_eq(ghe.is_archive("a.gz"), false, "single gz is not an archive")
+assert_eq(ghe.asset_format("a.tgz").ext, ".tar.gz", "tgz canonical")
+assert_eq(ghe.asset_format("a.TXZ").ext, ".tar.xz", "txz canonical")
+assert_eq(ghe.asset_format("a.tbz2").ext, ".tar.bz2", "tbz2 canonical")
+assert_eq(ghe.asset_format("a.tar.gz").kind, "archiver", "tar.gz via archiver")
+assert_eq(ghe.asset_format("a.tar").kind, "tar", "tar via system tar")
+assert_eq(ghe.asset_format("tool-linux-x64.gz").tool, "gzip", "single gz")
+assert_eq(ghe.asset_format("tool.xz").tool, "xz", "single xz")
+assert_eq(ghe.asset_format("tool.bz2").tool, "bzip2", "single bz2")
+assert_eq(ghe.asset_format("tool.zst").tool, "zstd", "single zst")
+assert_eq(ghe.asset_format("tool.7z").kind, "unsupported", "7z")
+assert_eq(ghe.asset_format("tool-linux-amd64"), nil, "raw binary")
+assert_eq(ghe.asset_format(".gz"), nil, "bare suffix is not a format")
+
+-- install_asset with stubbed mise modules; records every call.
+local function with_install_stubs(os_type, tar_listing, fn)
+    local calls = {}
+    local saved = {
+        runtime = RUNTIME,
+        file = package.loaded.file,
+        archiver = package.loaded.archiver,
+        cmd = package.loaded.cmd,
+    }
+    RUNTIME = { osType = os_type, archType = "amd64" }
+    package.loaded.file = {
+        join_path = function(...)
+            return table.concat({ ... }, "/")
+        end,
+        move = function(from, to)
+            table.insert(calls, "move " .. from .. " -> " .. to)
+        end,
+    }
+    package.loaded.archiver = {
+        decompress = function(archive, dest, opts)
+            local strip = tostring(opts.strip_components)
+            table.insert(calls, "decompress " .. archive .. " -> " .. dest .. " strip=" .. strip)
+        end,
+    }
+    package.loaded.cmd = {
+        exec = function(command)
+            if command:find("ghe", 1, true) or command:find("/dl/", 1, true) then
+                error("paths must be passed via env, not interpolated: " .. command)
+            end
+            table.insert(calls, "exec " .. command)
+            if command:find("-tf", 1, true) then
+                return tar_listing or ""
+            end
+            return ""
+        end,
+    }
+    local ok, err = pcall(fn)
+    RUNTIME = saved.runtime
+    package.loaded.file = saved.file
+    package.loaded.archiver = saved.archiver
+    package.loaded.cmd = saved.cmd
+    if not ok then
+        error(err, 0)
+    end
+    return calls
+end
+
+local calls = with_install_stubs("linux", nil, function()
+    ghe.install_asset("/dl/tool-linux-amd64.tgz", "/inst", {}, "tool")
+end)
+assert_eq(calls[1], "move /dl/tool-linux-amd64.tgz -> /dl/mise-ghe-asset.tar.gz", "tgz renamed for archiver")
+assert_eq(calls[2], "decompress /dl/mise-ghe-asset.tar.gz -> /inst strip=1", "tgz extracted")
+
+calls = with_install_stubs("linux", nil, function()
+    ghe.install_asset("/dl/TOOL.TAR.GZ", "/inst", {}, "tool")
+end)
+assert_eq(calls[2], "decompress /dl/mise-ghe-asset.tar.gz -> /inst strip=1", "upper-case suffix normalized")
+
+calls = with_install_stubs("linux", nil, function()
+    ghe.install_asset("/dl/tool.tar.gz", "/inst", {}, "tool")
+end)
+assert_eq(calls[1], "move /dl/tool.tar.gz -> /dl/mise-ghe-asset.tar.gz", "tar.gz uses a fixed local name")
+
+calls = with_install_stubs("linux", "tool-1.0/\ntool-1.0/bin/tool\n", function()
+    ghe.install_asset("/dl/tool.tar", "/inst", {}, "tool")
+end)
+assert_eq(calls[1], 'exec tar -tf "$MISE_GHE_ARCHIVE"', "tar listed")
+assert_eq(calls[2], 'exec tar -xf "$MISE_GHE_ARCHIVE" -C "$MISE_GHE_DEST" --strip-components=1', "single dir stripped")
+
+calls = with_install_stubs("linux", "./tool\n./README.md\n", function()
+    ghe.install_asset("/dl/tool.tar.zst", "/inst", {}, "tool")
+end)
+assert_eq(calls[2], 'exec tar -xf "$MISE_GHE_ARCHIVE" -C "$MISE_GHE_DEST"', "root files kept")
+
+calls = with_install_stubs("linux", nil, function()
+    ghe.install_asset("/dl/tool-linux-x64.gz", "/inst", { bin = "tree-sitter" }, "tool")
+end)
+assert_eq(calls[1], 'exec gzip -dc "$MISE_GHE_SOURCE" > "$MISE_GHE_DEST"', "gz decompressed, not moved")
+assert_eq(calls[2], 'exec chmod +x "$MISE_GHE_BIN"', "decompressed binary made executable")
+assert_eq(#calls, 2, "no move of the compressed file")
+
+calls = with_install_stubs("linux", nil, function()
+    ghe.install_asset("/dl/tool-linux-amd64", "/inst", {}, "tool")
+end)
+assert_eq(calls[1], "move /dl/tool-linux-amd64 -> /inst/tool", "raw binary moved")
+
+assert_err(function()
+    with_install_stubs("windows", nil, function()
+        ghe.install_asset("/dl/tool-windows-x64.gz", "/inst", {}, "tool")
+    end)
+end, "not supported on Windows", "single gz on windows")
+assert_err(function()
+    with_install_stubs("linux", nil, function()
+        ghe.install_asset("/dl/tool.7z", "/inst", {}, "tool")
+    end)
+end, "Unsupported asset format .7z", "7z rejected")
 
 local releases = {
     {

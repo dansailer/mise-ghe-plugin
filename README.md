@@ -116,6 +116,8 @@ GH_CONFIG_DIR = "/custom/path/to/gh-config"
 
 ## Tool options
 
+Supported release assets: archives (`.tar.gz`/`.tgz`, `.tar.xz`/`.txz`, `.tar.bz2`/`.tbz2`, `.zip`; `.tar` and `.tar.zst` via the system `tar`), single compressed binaries (`.gz`, `.xz`, `.bz2`, `.zst`, decompressed with the matching tool; not on Windows), and raw binaries. Archives are extracted with one top-level directory stripped; single binaries are installed as `bin` (default: the repo name).
+
 | Option | Purpose |
 |--------|---------|
 | `api_url` | Override the GHE API root for one tool (use global `MISE_GHE_API_URL` instead when possible) |
@@ -151,6 +153,17 @@ ghe:org/repo[api_url=https://github.other.com/api/v3]@latest
 All other tools continue to use the global `MISE_GHE_API_URL`.
 
 `ls-remote` lists non-draft versions oldest → newest and strips a leading `v` (`v1.2.3` → `1.2.3`).
+
+### How the release asset is chosen
+
+Asset names are split into tokens (`tool_2.0_linux_amd64.tar.gz` → `tool`, `2.0`, `linux`, `amd64`), and the plugin picks the best-scoring asset for the current platform:
+
+- Checksum and signature files (`.sha256`, `.sha512`, `.sig`, `.pem`, `.intoto.jsonl`, `checksums.txt`, `SHA256SUMS`, …) and OS packages (`.deb`, `.rpm`, `.msi`, `.pkg`, `.dmg`, …) are never installed.
+- Assets labelled for another OS or another architecture are rejected, so a missing build fails with the list of available assets instead of installing the wrong binary.
+- A native architecture beats a universal macOS binary (`universal`, `darwin_all`), which beats an emulated one: `amd64` on Apple Silicon (Rosetta 2) and `amd64`/`x86` on Windows on Arm.
+- Archives are preferred over bare binaries, `msvc` over `gnu` on Windows, and glibc over `musl` builds. Names with `debug`/`test` tokens score lower.
+
+If the choice is wrong, set `asset_pattern` (alias `matching`): only assets whose name contains that substring are considered, and they may be for another OS or architecture.
 
 ---
 
