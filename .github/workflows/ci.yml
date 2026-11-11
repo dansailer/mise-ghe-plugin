@@ -16,31 +16,39 @@ concurrency:
 jobs:
   lint:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v7
       - uses: lunarmodules/luacheck@v1
 
   unit:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
-      # Ubuntu's lua5.1 package: building Lua from lua.org is slower and
-      # fails when lua.org is unreachable.
-      - name: Install Lua 5.1
+      # Build Lua 5.1 from the official GitHub mirror: no lua.org or apt
+      # mirror access needed (both were unreachable from runners).
+      - uses: actions/checkout@v7
+        with:
+          repository: lua/lua
+          ref: v5.1.1
+          path: .lua-src
+      - name: Build Lua 5.1
         run: |
-          for attempt in 1 2 3; do
-            sudo apt-get install -y --no-install-recommends lua5.1 && exit 0
-            sleep 10
-            sudo apt-get update -q || true
-          done
-          exit 1
-      - run: lua5.1 test/ghe_check.lua
+          cd .lua-src
+          gcc -O2 -w -DLUA_USE_POSIX -o lua *.c -lm
+          ./lua -v
+      - run: .lua-src/lua test/ghe_check.lua
       - name: Syntax check
-        run: luac5.1 -p metadata.lua lib/*.lua hooks/*.lua
+        run: |
+          for f in metadata.lua lib/*.lua hooks/*.lua; do
+            .lua-src/lua -e "assert(loadfile('$f'))"
+          done
 
   smoke:
     name: smoke (${{ matrix.os }})
     needs: [lint, unit]
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
