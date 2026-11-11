@@ -24,12 +24,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - uses: leafo/gh-actions-lua@v13
-        with:
-          luaVersion: "5.1.5"
-      - run: lua test/ghe_check.lua
+      # Ubuntu's lua5.1 package: building Lua from lua.org is slower and
+      # fails when lua.org is unreachable.
+      - name: Install Lua 5.1
+        run: sudo apt-get install -y --no-install-recommends lua5.1
+      - run: lua5.1 test/ghe_check.lua
       - name: Syntax check
-        run: luac -p metadata.lua lib/*.lua hooks/*.lua
+        run: luac5.1 -p metadata.lua lib/*.lua hooks/*.lua
 
   smoke:
     name: smoke (${{ matrix.os }})
