@@ -1036,7 +1036,7 @@ function M.install_asset(path, install_path, options, repo)
         extract_with_tar(path, install_path)
         return
     end
-    local dest = file.join_path(install_path, M.bin_name(options, repo))
+    local dest = file.join_path(install_path, M.bin_name(options, repo, M.safe_filename(path)))
     if format and format.kind == "compressed" then
         decompress_single(format, path, dest)
     else
@@ -1054,15 +1054,31 @@ function M.chmod_x(path)
     cmd.exec('chmod +x "$MISE_GHE_BIN"', { env = { MISE_GHE_BIN = path } })
 end
 
+-- File extensions Windows runs through PATHEXT.
+local WINDOWS_EXEC_SUFFIXES = { ".exe", ".cmd", ".bat", ".ps1", ".com" }
+
 --- Resolve and validate the installed binary name for a repository.
--- The bin option is preferred; rename_exe is a deprecated synonym.
-function M.bin_name(options, repo)
+-- The bin option is preferred; rename_exe is a deprecated synonym. On Windows
+-- the name gets the asset's executable extension (default .exe) unless it
+-- already has one, because Windows only runs files with a PATHEXT extension.
+function M.bin_name(options, repo, asset_name)
     local name = option_string(options, "bin")
-        or option_string(options, "rename_exe")  -- deprecated: use bin
+        or option_string(options, "rename_exe") -- deprecated: use bin
         or repo
     local safe = M.safe_filename(name)
     if not safe then
         error("Invalid binary name")
+    end
+    if is_windows() and not any_suffix(safe:lower(), WINDOWS_EXEC_SUFFIXES) then
+        local ext = ".exe"
+        if type(asset_name) == "string" then
+            for _, suffix in ipairs(WINDOWS_EXEC_SUFFIXES) do
+                if ends_with(asset_name:lower(), suffix) then
+                    ext = suffix
+                end
+            end
+        end
+        safe = safe .. ext
     end
     return safe
 end
