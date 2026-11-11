@@ -49,6 +49,17 @@ for spec in "$@"; do
     bin="${spec##*=}"
     echo "::group::$tool"
     mise install "$tool"
+    if command -v cygpath >/dev/null 2>&1; then
+        # Windows: the installed binary must keep an executable extension.
+        install_dir="$(cygpath -u "$(mise where "$tool")")"
+        exe="$(find "$install_dir" -type f -iname "$bin.exe" | head -n 1)"
+        if [ -z "$exe" ]; then
+            echo "smoke: no $bin.exe under $install_dir" >&2
+            find "$install_dir" -type f >&2
+            exit 1
+        fi
+        echo "found $exe"
+    fi
     mise exec "$tool" -- "$bin" --version
     echo "::endgroup::"
 done
