@@ -105,6 +105,7 @@ GH_CONFIG_DIR = "/custom/path/to/gh-config"
 | `MISE_GITHUB_ENTERPRISE_TOKEN` | Private repos, no `gh` login | Preferred explicit token |
 | `MISE_GHE_TOKEN` | Private repos, no `gh` login | Fallback token |
 | `MISE_GHE_TOKEN_HOSTS` | Token for a per-tool `api_url` host | Extra hosts (comma-separated) that may receive `MISE_GITHUB_ENTERPRISE_TOKEN` / `MISE_GHE_TOKEN` |
+| `MISE_GHE_VERIFY` | Optional | Download verification mode for all tools: `auto` (default), `required` or `off` (see [Download verification](#download-verification)) |
 | `MISE_GITHUB_TOKEN` / `GITHUB_TOKEN` / `GITHUB_API_TOKEN` | Last resort | Generic token fallback; sent only to `github.com` or the Actions server unless `MISE_GHE_ALLOW_GITHUB_TOKEN=1` |
 | `MISE_GHE_ALLOW_GITHUB_TOKEN` | Generic token for GHE | Set to `1` to also send the generic tokens to the GHE hosts |
 
@@ -124,6 +125,7 @@ Supported release assets: archives (`.tar.gz`/`.tgz`, `.tar.xz`/`.txz`, `.tar.bz
 | `prerelease` | `true` to list prereleases in `mise ls-remote` / `latest` (they can always be installed by exact version) |
 | `rename_exe` | Deprecated — use `bin` |
 | `token` | Per-tool token (use env vars instead) |
+| `verify` | `auto`, `required` or `off`; overrides `MISE_GHE_VERIFY` for this tool |
 
 Versions are the release tags with one leading `v`/`V` removed when a digit follows (`v1.2.3` → `1.2.3`; `jq-1.7.1` stays). Drafts are never listed, prereleases only with `prerelease = true`. `latest` is the release GitHub marks as *Latest*.
 
@@ -167,6 +169,26 @@ Asset names are split into tokens (`tool_2.0_linux_amd64.tar.gz` → `tool`, `2.
 If the choice is wrong, set `asset_pattern` (alias `matching`): only assets whose name contains that substring are considered, and they may be for another OS or architecture.
 
 ---
+
+## Download verification
+
+After downloading a release asset, the plugin checks its SHA-256 against the first of these that the release publishes:
+
+1. the asset's `digest`, which GitHub computes for assets uploaded since mid-2025 and returns in the API (GHE versions that support it do the same)
+2. a sidecar asset named `<asset>.sha256`, `<asset>.sha256sum` or `<asset>.sha256.txt` (e.g. ripgrep)
+3. a release-wide list such as `checksums.txt`, `*_checksums.txt`, `SHA256SUMS` or `sha256sum.txt` that has a line for the asset (e.g. GitHub CLI)
+
+A mismatch always fails the install. When nothing is published:
+
+| Mode | Behaviour |
+|------|-----------|
+| `auto` (default) | warn and install unverified |
+| `required` | fail the install |
+| `off` | skip verification (no checksum downloads) |
+
+Set the mode globally with `MISE_GHE_VERIFY` or per tool with the `verify` option. Hashing uses `sha256sum` or `shasum` (Linux, macOS) or `certutil` (Windows).
+
+A checksum from the same release protects against corrupted or swapped downloads, not against a compromised release. For that, check the project's signatures or attestations (e.g. `gh attestation verify`).
 
 ## Uninstall
 

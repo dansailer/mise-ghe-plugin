@@ -825,4 +825,153 @@ if not os.getenv("MISE_GHE_API_URL") and not os.getenv("GHE_API_URL") then
     end, "MISE_GHE_API_URL", "missing api_url")
 end
 
+do
+    local HEX_A = string.rep("a", 64)
+    local HEX_B = string.rep("b", 64)
+    local saved = {
+        getenv = os.getenv,
+        http = package.loaded.http,
+        file = package.loaded.file,
+        cmd = package.loaded.cmd,
+        log = package.loaded.log,
+        runtime = RUNTIME.osType,
+    }
+    local env = {}
+    os.getenv = function(k)
+        return env[k]
+    end
+
+    -- verify_mode
+    assert_eq(ghe.verify_mode({}), "auto", "verify default")
+    assert_eq(ghe.verify_mode({ verify = "Required" }), "required", "verify option")
+    env.MISE_GHE_VERIFY = "off"
+    assert_eq(ghe.verify_mode({}), "off", "verify env")
+    assert_eq(ghe.verify_mode({ verify = "auto" }), "auto", "verify option wins over env")
+    env.MISE_GHE_VERIFY = nil
+    assert_err(function()
+        ghe.verify_mode({ verify = "yes" })
+    end, "Invalid verify mode", "verify invalid")
+
+    -- digest and checksum parsing
+    assert_eq(ghe.digest_sha256({ digest = "sha256:" .. HEX_A:upper() }), HEX_A, "digest sha256")
+    assert_eq(ghe.digest_sha256({ digest = "sha512:" .. HEX_A }), nil, "digest other algorithm")
+    assert_eq(ghe.digest_sha256({ digest = "sha256:abc" }), nil, "digest short")
+    assert_eq(ghe.digest_sha256({}), nil, "no digest")
+    local list = HEX_B .. "  other.tar.gz\n" .. HEX_A .. " *tool-linux-amd64.tar.gz\r\n"
+    assert_eq(ghe.parse_checksums(list, "tool-linux-amd64.tar.gz"), HEX_A, "checksums binary-mode line")
+    assert_eq(ghe.parse_checksums(HEX_A .. "  ./t.zip\n", "t.zip"), HEX_A, "checksums ./ prefix")
+    assert_eq(ghe.parse_checksums("SHA256 (t.zip) = " .. HEX_A .. "\n", "t.zip"), HEX_A, "checksums BSD")
+    assert_eq(ghe.parse_checksums(list, "missing.zip"), nil, "checksums missing entry")
+    assert_eq(ghe.parse_checksums(HEX_A .. "\n", "t.zip", true), HEX_A, "sidecar hash only")
+    assert_eq(ghe.parse_checksums(HEX_A .. "  t.zip-other\n", "t.zip", false), nil, "list needs the name")
+
+    -- sha256_file parses sha256sum and certutil output
+    local seen_cmd
+    package.loaded.cmd = {
+        exec = function(c, opts)
+            seen_cmd = { c = c, opts = opts }
+            if c:find("certutil", 1, true) then
+                return "SHA256 hash of C:\\d\\t.zip:\r\n"
+                    .. HEX_A:sub(1, 2)
+                    .. " "
+                    .. HEX_A:sub(3)
+                    .. "\r\nCertUtil: -hashfile command completed successfully.\r\n"
+            end
+            return HEX_B .. "  " .. opts.env.MISE_GHE_HASH_FILE .. "\n"
+        end,
+    }
+    assert_eq(ghe.sha256_file("/tmp/dl/t.tar.gz"), HEX_B, "sha256sum output")
+    assert_eq(seen_cmd.opts.env.MISE_GHE_HASH_FILE, "/tmp/dl/t.tar.gz", "path passed via env, not the command")
+    assert_eq(seen_cmd.c:find("/tmp/dl", 1, true), nil, "path not in the shell command")
+    RUNTIME.osType = "windows"
+    assert_eq(ghe.sha256_file("C:\\d\\t.zip"), HEX_A, "certutil output")
+    RUNTIME.osType = saved.runtime
+
+    -- expected_sha256 and verify_asset with mocked downloads
+    local files = {}
+    local downloads = {}
+    package.loaded.file = {
+        join_path = function(a, b)
+            return a .. "/" .. b
+        end,
+        exists = function(path)
+            return files[path] ~= nil
+        end,
+    }
+    local tmp = os.tmpname()
+    os.remove(tmp)
+    os.execute("mkdir -p '" .. tmp .. "'")
+    local served = {}
+    package.loaded.http = {
+        download_file = function(req, dest)
+            table.insert(downloads, req.url)
+            local f = assert(io.open(dest, "wb"))
+            f:write(served[req.url] or "")
+            f:close()
+            files[dest] = true
+        end,
+    }
+    local warned = {}
+    package.loaded.log = {
+        warn = function(msg)
+            table.insert(warned, msg)
+        end,
+    }
+    local api = "https://ghe.example/api/v3"
+    local function a(name, id)
+        return { name = name, url = api .. "/repos/o/t/releases/assets/" .. id }
+    end
+    local main_asset = a("t-linux-amd64.tar.gz", 1)
+
+    -- digest wins and needs no download
+    local with_digest = { name = main_asset.name, url = main_asset.url, digest = "sha256:" .. HEX_B }
+    local hex, source = ghe.expected_sha256(with_digest, { with_digest }, tmp, nil, api)
+    assert_eq(hex, HEX_B, "expected from digest")
+    assert_eq(source, "GitHub asset digest", "digest source")
+    assert_eq(#downloads, 0, "digest needs no download")
+
+    -- per-asset sidecar
+    local sidecar = a("t-linux-amd64.tar.gz.sha256", 2)
+    served[sidecar.url] = HEX_A .. "\n"
+    hex, source = ghe.expected_sha256(main_asset, { main_asset, sidecar }, tmp, nil, api)
+    assert_eq(hex, HEX_A, "expected from sidecar")
+    assert_eq(source, sidecar.name, "sidecar source")
+
+    -- release-wide checksums file
+    local sums = a("t_1.0.0_checksums.txt", 3)
+    served[sums.url] = HEX_B .. "  t-darwin-arm64.tar.gz\n" .. HEX_A .. "  t-linux-amd64.tar.gz\n"
+    hex, source = ghe.expected_sha256(main_asset, { main_asset, sums }, tmp, nil, api)
+    assert_eq(hex, HEX_A, "expected from checksums.txt")
+    assert_eq(source, sums.name, "checksums source")
+    assert_eq(ghe.expected_sha256(main_asset, { main_asset }, tmp, nil, api), nil, "nothing published")
+
+    -- verify_asset: match, mismatch, missing in auto/required, off
+    package.loaded.cmd = {
+        exec = function()
+            return HEX_A .. "  x\n"
+        end,
+    }
+    local assets = { main_asset, sums }
+    assert_eq(ghe.verify_asset("/dl/t", main_asset, assets, "auto", tmp, nil, api), sums.name, "verify ok")
+    served[sums.url] = HEX_B .. "  t-linux-amd64.tar.gz\n"
+    assert_err(function()
+        ghe.verify_asset("/dl/t", main_asset, assets, "auto", tmp, nil, api)
+    end, "SHA-256 mismatch for t-linux-amd64.tar.gz", "verify mismatch")
+    assert_eq(ghe.verify_asset("/dl/t", main_asset, { main_asset }, "auto", tmp, nil, api), nil, "auto unverified")
+    assert_eq(#warned, 1, "auto warns when nothing is published")
+    assert_err(function()
+        ghe.verify_asset("/dl/t", main_asset, { main_asset }, "required", tmp, nil, api)
+    end, "No SHA-256 published", "required fails without checksum")
+    downloads = {}
+    assert_eq(ghe.verify_asset("/dl/t", main_asset, assets, "off", tmp, nil, api), nil, "off skips")
+    assert_eq(#downloads, 0, "off downloads nothing")
+
+    os.execute("rm -rf '" .. tmp .. "'")
+    os.getenv = saved.getenv
+    package.loaded.http = saved.http
+    package.loaded.file = saved.file
+    package.loaded.cmd = saved.cmd
+    package.loaded.log = saved.log
+end
+
 print("ghe_check: ok")

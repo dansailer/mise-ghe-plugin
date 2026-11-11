@@ -1028,6 +1028,209 @@ function M.download_asset(asset, dest, token, api_url)
     end
 end
 
+-- Verification modes for downloaded assets (tool option `verify`, env MISE_GHE_VERIFY).
+local VERIFY_MODES = { auto = true, required = true, off = true }
+
+--- Return the download verification mode: "auto" (default), "required" or "off".
+function M.verify_mode(options)
+    local value = option_string(options, "verify") or nonempty(os.getenv("MISE_GHE_VERIFY")) or "auto"
+    value = trim(value):lower()
+    if not VERIFY_MODES[value] then
+        error("Invalid verify mode '" .. value .. "': use auto, required or off")
+    end
+    return value
+end
+
+-- Release assets that list checksums for several files, matched case-insensitively.
+local CHECKSUM_LIST_NAMES = {
+    "checksums.txt",
+    "checksums.sha256",
+    "sha256sums",
+    "sha256sums.txt",
+    "sha256sum.txt",
+}
+
+local function is_checksum_list(name)
+    local lower = name:lower()
+    for _, n in ipairs(CHECKSUM_LIST_NAMES) do
+        if lower == n then
+            return true
+        end
+    end
+    -- e.g. tool_1.2.3_checksums.txt, tool-1.2.3-SHA256SUMS
+    return ends_with(lower, "checksums.txt") or ends_with(lower, "sha256sums") or ends_with(lower, "sha256sums.txt")
+end
+
+--- Return the lowercase hex SHA-256 from a GitHub asset `digest` ("sha256:<hex>"), or nil.
+function M.digest_sha256(asset)
+    local digest = type(asset) == "table" and asset.digest
+    if type(digest) ~= "string" then
+        return nil
+    end
+    local hex = digest:match("^[Ss][Hh][Aa]256:(%x+)$")
+    if hex and #hex == 64 then
+        return hex:lower()
+    end
+    return nil
+end
+
+--- Find the SHA-256 for `name` in checksum file text.
+-- Accepts "<hex>  name", "<hex> *name", "<hex>  ./name" and BSD
+-- "SHA256 (name) = <hex>" lines, and a file that
+-- holds a single hash (a per-asset sidecar) when single_ok is true.
+function M.parse_checksums(text, name, single_ok)
+    if type(text) ~= "string" then
+        return nil
+    end
+    local hashes = {}
+    for line in text:gmatch("[^\r\n]+") do
+        local hex, rest = line:match("^%s*(%x+)%s+%*?(.-)%s*$")
+        if not hex then
+            -- BSD style: "SHA256 (name) = <hex>"
+            rest, hex = line:match("^%s*SHA256 %((.-)%) = (%x+)%s*$")
+        end
+        if hex and #hex == 64 then
+            rest = rest:gsub("^%./", "")
+            if rest == name then
+                return hex:lower()
+            end
+            table.insert(hashes, { hex = hex:lower(), rest = rest })
+        else
+            local only = line:match("^%s*(%x+)%s*$")
+            if only and #only == 64 then
+                table.insert(hashes, { hex = only:lower(), rest = "" })
+            end
+        end
+    end
+    if single_ok and #hashes == 1 then
+        return hashes[1].hex
+    end
+    return nil
+end
+
+-- Download a small checksum asset next to the downloads and return its text.
+local function fetch_text_asset(asset, dir, token, api_url)
+    local file = require("file")
+    local name = M.safe_filename(asset.name)
+    if not name then
+        return nil
+    end
+    local path = file.join_path(dir, name)
+    M.download_asset(asset, path, token, api_url)
+    local f = io.open(path, "rb")
+    if not f then
+        return nil
+    end
+    local text = f:read("*a")
+    f:close()
+    return text
+end
+
+--- Find the expected SHA-256 for `asset` in release `assets`.
+-- Prefers the asset's API `digest`, then a "<name>.sha256" / ".sha256sum"
+-- sidecar, then a release-wide checksums file. Returns hex, source (or nil).
+function M.expected_sha256(asset, assets, dir, token, api_url)
+    local hex = M.digest_sha256(asset)
+    if hex then
+        return hex, "GitHub asset digest"
+    end
+    local by_name = {}
+    for _, a in ipairs(assets or {}) do
+        if type(a) == "table" and type(a.name) == "string" then
+            by_name[a.name] = a
+        end
+    end
+    for _, suffix in ipairs({ ".sha256", ".sha256sum", ".sha256.txt" }) do
+        local sidecar = by_name[asset.name .. suffix]
+        if sidecar then
+            hex = M.parse_checksums(fetch_text_asset(sidecar, dir, token, api_url), asset.name, true)
+            if hex then
+                return hex, sidecar.name
+            end
+        end
+    end
+    for _, a in ipairs(assets or {}) do
+        if type(a) == "table" and type(a.name) == "string" and a ~= asset and is_checksum_list(a.name) then
+            hex = M.parse_checksums(fetch_text_asset(a, dir, token, api_url), asset.name, false)
+            if hex then
+                return hex, a.name
+            end
+        end
+    end
+    return nil
+end
+
+--- Compute the lowercase hex SHA-256 of a file with the platform's tool:
+-- certutil on Windows, sha256sum or shasum elsewhere.
+function M.sha256_file(path)
+    local cmd = require("cmd")
+    local ok, out
+    if is_windows() then
+        if path:find('"', 1, true) then
+            error("Cannot hash a path containing a double quote: " .. path)
+        end
+        ok, out = pcall(cmd.exec, 'certutil -hashfile "' .. path .. '" SHA256', { timeout = 300 })
+    else
+        ok, out = pcall(
+            cmd.exec,
+            'if command -v sha256sum >/dev/null 2>&1; then sha256sum "$MISE_GHE_HASH_FILE"; '
+                .. 'else shasum -a 256 "$MISE_GHE_HASH_FILE"; fi',
+            { env = { MISE_GHE_HASH_FILE = path }, timeout = 300 }
+        )
+    end
+    if not ok then
+        error("Could not compute SHA-256 of " .. path .. ": " .. tostring(out))
+    end
+    for line in tostring(out):gmatch("[^\r\n]+") do
+        -- sha256sum/shasum print "<hex>  <path>"; certutil prints the hash on
+        -- its own line, with spaces between the bytes in older versions.
+        local hex = line:match("^(%x+)%s")
+        if not hex or #hex ~= 64 then
+            hex = line:gsub("%s", ""):match("^(%x+)$")
+        end
+        if hex and #hex == 64 then
+            return hex:lower()
+        end
+    end
+    error("Could not parse SHA-256 output for " .. path)
+end
+
+--- Verify a downloaded asset against its published SHA-256.
+-- mode "off" skips; "auto" warns when no checksum is published; "required"
+-- fails then. A mismatch always fails. Returns the checksum source or nil.
+function M.verify_asset(path, asset, assets, mode, dir, token, api_url)
+    if mode == "off" then
+        return nil
+    end
+    local expected, source = M.expected_sha256(asset, assets, dir, token, api_url)
+    if not expected then
+        local msg = "No SHA-256 published for release asset " .. tostring(asset.name)
+        if mode == "required" then
+            error(msg .. " (verify = required). Set verify = \"auto\" or \"off\" to install it unverified.")
+        end
+        log_warn(msg .. "; installing it unverified")
+        return nil
+    end
+    local actual = M.sha256_file(path)
+    if actual ~= expected then
+        error(
+            "SHA-256 mismatch for "
+                .. tostring(asset.name)
+                .. ": expected "
+                .. expected
+                .. " ("
+                .. source
+                .. "), got "
+                .. actual
+        )
+    end
+    local ok, log = pcall(require, "log")
+    if ok and type(log) == "table" and log.debug then
+        log.debug("Verified SHA-256 of " .. tostring(asset.name) .. " against " .. source)
+    end
+    return source
+end
+
 --- Create an installation or download directory without interpolating its path.
 function M.ensure_dir(path)
     local file = require("file")
