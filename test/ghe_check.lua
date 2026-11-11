@@ -32,9 +32,11 @@ assert_eq(ghe.normalize_tag("release-1.2"), "release-1.2", "keep other prefix")
 local owner, repo = ghe.parse_tool("org/repo")
 assert_eq(owner, "org", "parse owner")
 assert_eq(repo, "repo", "parse repo")
-owner, repo = ghe.parse_tool("org/repo/unused")
-assert_eq(owner, "org", "parse extra owner")
-assert_eq(repo, "repo", "parse extra repo")
+assert_err(function()
+    ghe.parse_tool("org/repo/unused")
+end, "owner/repo", "extra path components are an error")
+owner, repo = ghe.parse_tool(" /org/repo/ ")
+assert_eq(owner .. "/" .. repo, "org/repo", "surrounding slashes and spaces are trimmed")
 assert_err(function()
     ghe.parse_tool("org")
 end, "owner/repo", "missing slash")
@@ -47,7 +49,11 @@ assert_err(function()
     ghe.api_url({ api_url = "https://user:pass@ghe.example/api/v3" })
 end, "userinfo", "reject userinfo")
 assert_eq(ghe.host_from_api_url("https://github.mycompany.com/api/v3"), "github.mycompany.com", "host")
-assert_eq(ghe.host_from_api_url("https://user:pass@github.mycompany.com:443/api/v3"), "github.mycompany.com", "strip userinfo/port")
+assert_eq(
+    ghe.host_from_api_url("https://user:pass@github.mycompany.com:443/api/v3"),
+    "github.mycompany.com",
+    "strip userinfo/port"
+)
 assert_eq(
     ghe.same_http_host("https://ghe.example/api/v3/repos/o/r/releases/assets/1", "https://ghe.example/api/v3"),
     true,
@@ -136,8 +142,7 @@ package.loaded.file = {
         return table.concat(parts, "/")
     end,
     exists = function(path)
-        return path == "/home/test/.config/gh/hosts.yml"
-            or path == "/home/test/.local/share/mise/shims/gh"
+        return path == "/home/test/.config/gh/hosts.yml" or path == "/home/test/.local/share/mise/shims/gh"
     end,
 }
 package.loaded.cmd = {
@@ -219,15 +224,11 @@ assert_eq(
     "no configured host: GHE token is not sent to a per-tool api_url"
 )
 assert_eq(
-    token_with_env(
-        {
-            MISE_GHE_API_URL = A_URL,
-            MISE_GHE_TOKEN = "tok-a",
-            MISE_GHE_TOKEN_HOSTS = "ghe.c.example, ghe.b.example",
-        },
-        {},
-        B_URL
-    ),
+    token_with_env({
+        MISE_GHE_API_URL = A_URL,
+        MISE_GHE_TOKEN = "tok-a",
+        MISE_GHE_TOKEN_HOSTS = "ghe.c.example, ghe.b.example",
+    }, {}, B_URL),
     "tok-a",
     "MISE_GHE_TOKEN_HOSTS allows another host"
 )
@@ -298,16 +299,19 @@ assert_eq(h["Accept"], "application/vnd.github+json", "accept")
 assert_eq(h["Authorization"], nil, "no auth")
 h = ghe.headers("secret")
 assert_eq(h["Authorization"], "Bearer secret", "bearer")
-assert_eq(tostring(h["Authorization"]):find("secret", 1, true) ~= nil, true, "header has token internally")
 
 -- score_asset and os_arch are internal; verify their effects via pick_asset
-local linux_asset = { name = "tool-linux-amd64.tar.gz",          url = "https://ghe.example/x/1" }
-local musl_asset  = { name = "tool-linux-amd64-musl.tar.gz",     url = "https://ghe.example/x/2" }
-local win_asset   = { name = "tool-windows-amd64.zip",           url = "https://ghe.example/x/3" }
-local sum_asset   = { name = "tool-linux-amd64.tar.gz.sha256",   url = "https://ghe.example/x/4" }
+local linux_asset = { name = "tool-linux-amd64.tar.gz", url = "https://ghe.example/x/1" }
+local musl_asset = { name = "tool-linux-amd64-musl.tar.gz", url = "https://ghe.example/x/2" }
+local win_asset = { name = "tool-windows-amd64.zip", url = "https://ghe.example/x/3" }
+local sum_asset = { name = "tool-linux-amd64.tar.gz.sha256", url = "https://ghe.example/x/4" }
 assert_eq(ghe.pick_asset({ linux_asset, musl_asset }, {}).name, "tool-linux-amd64.tar.gz", "prefer gnu over musl")
-assert_eq(ghe.pick_asset({ linux_asset, win_asset },  {}).name, "tool-linux-amd64.tar.gz", "prefer native OS")
-assert_eq(ghe.pick_asset({ linux_asset, sum_asset },  {}).name, "tool-linux-amd64.tar.gz", "prefer archive over checksum")
+assert_eq(ghe.pick_asset({ linux_asset, win_asset }, {}).name, "tool-linux-amd64.tar.gz", "prefer native OS")
+assert_eq(
+    ghe.pick_asset({ linux_asset, sum_asset }, {}).name,
+    "tool-linux-amd64.tar.gz",
+    "prefer archive over checksum"
+)
 
 -- Platform-aware asset selection (#4, #5). pick_asset reads RUNTIME on each call.
 local function names_to_assets(text)
