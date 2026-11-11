@@ -50,14 +50,24 @@ mise install
 
 ## Authentication
 
-The plugin resolves credentials in this order:
+The plugin resolves credentials in this order. Each token is only sent to the host it belongs to:
 
-| Priority | Source |
-|----------|--------|
-| 1 | Tool option `token` (avoid — do not store tokens in `mise.toml`) |
-| 2 | `MISE_GITHUB_ENTERPRISE_TOKEN`, then `MISE_GHE_TOKEN` |
-| 3 | `gh auth token` for the API hostname (recommended) |
-| 4 | `MISE_GITHUB_TOKEN`, then `GITHUB_TOKEN`, then `GITHUB_API_TOKEN` |
+| Priority | Source | Sent to |
+|----------|--------|---------|
+| 1 | Tool option `token` (avoid — do not store tokens in `mise.toml`) | that tool's `api_url` |
+| 2 | `MISE_GITHUB_ENTERPRISE_TOKEN`, then `MISE_GHE_TOKEN` | the host of `MISE_GHE_API_URL` / `GHE_API_URL`, and hosts listed in `MISE_GHE_TOKEN_HOSTS` |
+| 3 | `gh auth token` for the API hostname (recommended) | the host gh issued it for |
+| 4 | `MISE_GITHUB_TOKEN`, then `GITHUB_TOKEN`, then `GITHUB_API_TOKEN` | `github.com`, the GitHub Actions server (`GITHUB_SERVER_URL`, so a GHES runner's `GITHUB_TOKEN` works), or the GHE hosts from row 2 when `MISE_GHE_ALLOW_GITHUB_TOKEN=1` |
+
+When a token variable is set but withheld from a host, mise prints a warning naming the variable (never its value) and how to allow it.
+
+**Per-tool `api_url` on another host:** a tool whose `api_url` points at a different host does not receive `MISE_GHE_TOKEN`/`MISE_GITHUB_ENTERPRISE_TOKEN`. Log in with `gh auth login --hostname <host>`, or list the host explicitly:
+
+```toml
+[env]
+MISE_GHE_API_URL     = "https://github.mycompany.com/api/v3"
+MISE_GHE_TOKEN_HOSTS = "github.other.com"   # comma-separated hostnames or URLs
+```
 
 **Recommended:** use `gh auth login`. The plugin calls `gh auth token` automatically — no token env var needed.
 
@@ -96,7 +106,9 @@ GH_CONFIG_DIR = "/custom/path/to/gh-config"
 | `GH_CONFIG_DIR` | Non-standard gh setup | Directory containing `hosts.yml` |
 | `MISE_GITHUB_ENTERPRISE_TOKEN` | Private repos, no `gh` login | Preferred explicit token |
 | `MISE_GHE_TOKEN` | Private repos, no `gh` login | Fallback token |
-| `MISE_GITHUB_TOKEN` / `GITHUB_TOKEN` / `GITHUB_API_TOKEN` | Last resort | Generic token fallback |
+| `MISE_GHE_TOKEN_HOSTS` | Token for a per-tool `api_url` host | Extra hosts (comma-separated) that may receive `MISE_GITHUB_ENTERPRISE_TOKEN` / `MISE_GHE_TOKEN` |
+| `MISE_GITHUB_TOKEN` / `GITHUB_TOKEN` / `GITHUB_API_TOKEN` | Last resort | Generic token fallback; sent only to `github.com` or the Actions server unless `MISE_GHE_ALLOW_GITHUB_TOKEN=1` |
+| `MISE_GHE_ALLOW_GITHUB_TOKEN` | Generic token for GHE | Set to `1` to also send the generic tokens to the GHE hosts |
 
 `MISE_GHE_API_URL` must use HTTPS. Trailing slashes are stripped. Userinfo (`user:pass@`) is rejected — use a token env var instead.
 
