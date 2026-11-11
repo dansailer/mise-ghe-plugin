@@ -575,14 +575,45 @@ function M.get_json(url, token)
     return data
 end
 
---- Fetch all published releases for a repository, up to ten API pages.
--- The API's release order is preserved for later version ordering decisions.
+-- Report a non-fatal problem through mise's log when it is available.
+local function log_warn(msg)
+    local ok, log = pcall(require, "log")
+    if ok and type(log) == "table" and log.warn then
+        log.warn(msg)
+    end
+end
+
+--- Fetch a JSON API resource that may not exist: nil on 404, data otherwise.
+-- Other errors are raised with the same messages as get_json.
+function M.try_get_json(url, token)
+    local http = require("http")
+    local json = require("json")
+    local resp = http.get({ url = url, headers = M.headers(token) })
+    if resp and resp.status_code == 404 then
+        return nil
+    end
+    if resp and resp.status_code >= 200 and resp.status_code < 300 then
+        local ok, data = pcall(json.decode, resp.body or "")
+        if ok then
+            return data
+        end
+    end
+    -- Let get_json produce its status-specific error message.
+    return M.get_json(url, token)
+end
+
+-- Maximum number of release pages (100 releases each) that are listed.
+local MAX_RELEASE_PAGES = 10
+
+--- Fetch all published releases for a repository, up to MAX_RELEASE_PAGES
+-- API pages (drafts are included and filtered by the callers). The API's
+-- newest-first order is preserved.
 function M.list_releases(api_url, owner, repo, token)
     local all = {}
     local page = 1
     local owner_esc = path_escape(owner)
     local repo_esc = path_escape(repo)
-    while page <= 10 do
+    while page <= MAX_RELEASE_PAGES do
         local url = string.format(
             "%s/repos/%s/%s/releases?per_page=100&page=%d",
             api_url,
@@ -610,17 +641,41 @@ function M.list_releases(api_url, owner, repo, token)
         if #data < 100 then
             break
         end
+        if page == MAX_RELEASE_PAGES then
+            log_warn(
+                owner
+                    .. "/"
+                    .. repo
+                    .. " has more than "
+                    .. (MAX_RELEASE_PAGES * 100)
+                    .. " releases; only the newest "
+                    .. (MAX_RELEASE_PAGES * 100)
+                    .. " are listed"
+            )
+        end
         page = page + 1
     end
     return all
 end
 
---- Remove one conventional leading v from a release tag.
+--- Return the tag of the release GitHub marks as "Latest", or nil.
+-- That release is never a draft or prerelease.
+function M.latest_release_tag(api_url, owner, repo, token)
+    local url = string.format("%s/repos/%s/%s/releases/latest", api_url, path_escape(owner), path_escape(repo))
+    local data = M.try_get_json(url, token)
+    if type(data) ~= "table" then
+        return nil
+    end
+    return nonempty(data.tag_name)
+end
+
+--- Remove one conventional leading v from a release tag: only a "v" or "V"
+-- directly followed by a digit (v1.2.3 -> 1.2.3, but version-1 stays).
 function M.normalize_tag(tag)
     if type(tag) ~= "string" then
         return tag
     end
-    return (tag:gsub("^v", ""))
+    return (tag:gsub("^[vV](%d)", "%1"))
 end
 
 -- Match a requested version while accepting either v1.2.3 or 1.2.3.
@@ -831,15 +886,29 @@ function M.find_release(releases, version)
     )
 end
 
+--- Report whether the tool option `prerelease` asks for prereleases.
+function M.include_prereleases(options)
+    local value = type(options) == "table" and options.prerelease
+    if type(value) == "string" then
+        value = trim(value):lower()
+        return value == "true" or value == "1" or value == "yes"
+    end
+    return value == true
+end
+
 --- Convert non-draft releases into unique versions, oldest first.
--- The GHE API returns releases newest-first; iterating in reverse gives oldest-first.
-function M.versions_from_releases(releases)
+-- The API returns releases newest-first; iterating in reverse gives oldest-first.
+-- Prereleases are skipped unless include_prereleases is true. mise treats the
+-- last version as `latest`, so the release GitHub marks as "Latest"
+-- (latest_tag) is moved to the end: a backport published after a newer
+-- major release then does not become `latest`.
+function M.versions_from_releases(releases, include_prereleases, latest_tag)
     local seen = {}
     local result = {}
     local list = releases or {}
     for i = #list, 1, -1 do
         local rel = list[i]
-        if rel.draft ~= true then
+        if rel.draft ~= true and (include_prereleases or rel.prerelease ~= true) then
             local tag = release_tag(rel)
             if tag then
                 local v = M.normalize_tag(tag)
@@ -850,7 +919,44 @@ function M.versions_from_releases(releases)
             end
         end
     end
+    local latest = latest_tag and M.normalize_tag(latest_tag)
+    if latest and seen[latest] and result[#result] ~= latest then
+        for i, v in ipairs(result) do
+            if v == latest then
+                table.remove(result, i)
+                break
+            end
+        end
+        table.insert(result, latest)
+    end
     return result
+end
+
+--- Fetch the non-draft release for one version, trying the tags endpoint
+-- for the version as given and with/without a leading "v" before falling
+-- back to the full release list (for releases found only by display name).
+function M.get_release(api_url, owner, repo, version, token)
+    local candidates = { version }
+    local normalized = M.normalize_tag(version)
+    if normalized ~= version then
+        table.insert(candidates, normalized)
+    elseif version:match("^%d") then
+        table.insert(candidates, "v" .. version)
+    end
+    for _, tag in ipairs(candidates) do
+        local url = string.format(
+            "%s/repos/%s/%s/releases/tags/%s",
+            api_url,
+            path_escape(owner),
+            path_escape(repo),
+            path_escape(tag)
+        )
+        local rel = M.try_get_json(url, token)
+        if type(rel) == "table" and rel.draft ~= true and type(rel.assets) == "table" then
+            return rel
+        end
+    end
+    return M.find_release(M.list_releases(api_url, owner, repo, token), version)
 end
 
 -- How the installer handles each asset suffix, longest suffixes first.
