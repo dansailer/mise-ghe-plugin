@@ -619,12 +619,50 @@ function M.versions_from_releases(releases)
     return result
 end
 
+-- How the installer handles each asset suffix, longest suffixes first.
+-- mise's archiver only extracts names ending (case-sensitively) in .tar.gz,
+-- .tar.xz, .tar.bz2 or .zip, so aliases such as .tgz are renamed to the
+-- canonical suffix first. Other tarballs go through the system tar, and
+-- single compressed binaries through the matching decompressor.
+local ASSET_FORMATS = {
+    { suffix = ".tar.gz", kind = "archiver", ext = ".tar.gz" },
+    { suffix = ".tar.xz", kind = "archiver", ext = ".tar.xz" },
+    { suffix = ".tar.bz2", kind = "archiver", ext = ".tar.bz2" },
+    { suffix = ".tar.zst", kind = "tar" },
+    { suffix = ".tgz", kind = "archiver", ext = ".tar.gz" },
+    { suffix = ".txz", kind = "archiver", ext = ".tar.xz" },
+    { suffix = ".tbz2", kind = "archiver", ext = ".tar.bz2" },
+    { suffix = ".tbz", kind = "archiver", ext = ".tar.bz2" },
+    { suffix = ".tzst", kind = "tar" },
+    { suffix = ".zip", kind = "archiver", ext = ".zip" },
+    { suffix = ".tar", kind = "tar" },
+    { suffix = ".gz", kind = "compressed", tool = "gzip" },
+    { suffix = ".xz", kind = "compressed", tool = "xz" },
+    { suffix = ".bz2", kind = "compressed", tool = "bzip2" },
+    { suffix = ".zst", kind = "compressed", tool = "zstd" },
+    { suffix = ".7z", kind = "unsupported" },
+    { suffix = ".rar", kind = "unsupported" },
+}
+
+--- Return how an asset is installed: a table with `suffix` and `kind`
+-- ("archiver", "tar", "compressed" or "unsupported"), or nil for a raw binary.
+function M.asset_format(name)
+    if type(name) ~= "string" then
+        return nil
+    end
+    local lower = name:lower()
+    for _, format in ipairs(ASSET_FORMATS) do
+        if #lower > #format.suffix and ends_with(lower, format.suffix) then
+            return format
+        end
+    end
+    return nil
+end
+
 --- Identify archive formats that the installer knows how to extract.
 function M.is_archive(name)
-    if type(name) ~= "string" then
-        return false
-    end
-    return any_suffix(name:lower(), ARCHIVE_SUFFIXES)
+    local format = M.asset_format(name)
+    return format ~= nil and (format.kind == "archiver" or format.kind == "tar")
 end
 
 --- Strip path components from an asset name and reject unusable filenames.
@@ -680,6 +718,97 @@ function M.ensure_dir(path)
     if not ok and not file.exists(path) then
         error("Failed to create directory: " .. tostring(err))
     end
+end
+
+-- Extract a tarball mise's archiver cannot read (.tar, .tar.zst) with the
+-- system tar (bsdtar on Windows 10+). Like the archiver's strip_components = 1,
+-- a single top-level directory is stripped; root-level files are kept.
+local function extract_with_tar(archive, dest)
+    local cmd = require("cmd")
+    local env = { MISE_GHE_ARCHIVE = archive, MISE_GHE_DEST = dest }
+    local list_cmd = is_windows() and 'tar -tf "%MISE_GHE_ARCHIVE%"' or 'tar -tf "$MISE_GHE_ARCHIVE"'
+    local ok, listing = pcall(cmd.exec, list_cmd, { env = env })
+    if not ok then
+        local hint = " with tar (is tar, and zstd for .zst, on PATH?): "
+        error("Failed to read " .. archive .. hint .. tostring(listing))
+    end
+    local top, strip = nil, true
+    for entry in tostring(listing):gmatch("[^\r\n]+") do
+        entry = entry:gsub("^%./", "")
+        if entry ~= "" and entry ~= "." then
+            local first = entry:match("^([^/]+)/")
+            if not first or (top and first ~= top) then
+                strip = false
+                break
+            end
+            top = first
+        end
+    end
+    strip = strip and top ~= nil
+    local flags = strip and " --strip-components=1" or ""
+    local extract_cmd = is_windows() and ('tar -xf "%MISE_GHE_ARCHIVE%" -C "%MISE_GHE_DEST%"' .. flags)
+        or ('tar -xf "$MISE_GHE_ARCHIVE" -C "$MISE_GHE_DEST"' .. flags)
+    local extracted, err = pcall(cmd.exec, extract_cmd, { env = env })
+    if not extracted then
+        error("Failed to extract " .. archive .. " with tar: " .. tostring(err))
+    end
+end
+
+-- Decompress a single compressed binary (.gz, .xz, .bz2, .zst) to dest.
+local function decompress_single(format, source, dest)
+    if is_windows() then
+        error(
+            "Single-file "
+                .. format.suffix
+                .. " assets are not supported on Windows. Set asset_pattern to select a .zip or .exe asset."
+        )
+    end
+    local cmd = require("cmd")
+    local command = format.tool .. ' -dc "$MISE_GHE_SOURCE" > "$MISE_GHE_DEST"'
+    local ok, err = pcall(cmd.exec, command, { env = { MISE_GHE_SOURCE = source, MISE_GHE_DEST = dest } })
+    if not ok then
+        error("Failed to decompress " .. source .. " (is " .. format.tool .. " installed?): " .. tostring(err))
+    end
+end
+
+--- Install a downloaded asset into install_path according to its format.
+-- Archives are extracted (stripping one top-level directory); single
+-- compressed binaries are decompressed and raw binaries moved, both to the
+-- name from bin_name() and marked executable.
+function M.install_asset(path, install_path, options, repo)
+    local file = require("file")
+    local format = M.asset_format(path)
+    if format and format.kind == "unsupported" then
+        error(
+            "Unsupported asset format "
+                .. format.suffix
+                .. ": "
+                .. path
+                .. ". Supported: .tar.gz/.tgz, .tar.xz/.txz, .tar.bz2/.tbz2, .zip, .tar, .tar.zst,"
+                .. " single .gz/.xz/.bz2/.zst files and raw binaries. Set asset_pattern to choose another asset."
+        )
+    end
+    if format and format.kind == "archiver" then
+        local archive = path
+        local canonical = file.join_path(parent_dir(path) or ".", "mise-ghe-asset" .. format.ext)
+        if canonical ~= path then
+            file.move(path, canonical)
+            archive = canonical
+        end
+        require("archiver").decompress(archive, install_path, { strip_components = 1 })
+        return
+    end
+    if format and format.kind == "tar" then
+        extract_with_tar(path, install_path)
+        return
+    end
+    local dest = file.join_path(install_path, M.bin_name(options, repo))
+    if format and format.kind == "compressed" then
+        decompress_single(format, path, dest)
+    else
+        file.move(path, dest)
+    end
+    M.chmod_x(dest)
 end
 
 --- Mark an installed non-Windows binary executable.

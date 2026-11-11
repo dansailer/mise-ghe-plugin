@@ -104,6 +104,8 @@ GH_CONFIG_DIR = "/custom/path/to/gh-config"
 
 ## Tool options
 
+Supported release assets: archives (`.tar.gz`/`.tgz`, `.tar.xz`/`.txz`, `.tar.bz2`/`.tbz2`, `.zip`; `.tar` and `.tar.zst` via the system `tar`), single compressed binaries (`.gz`, `.xz`, `.bz2`, `.zst`, decompressed with the matching tool; not on Windows), and raw binaries. Archives are extracted with one top-level directory stripped; single binaries are installed as `bin` (default: the repo name).
+
 | Option | Purpose |
 |--------|---------|
 | `api_url` | Override the GHE API root for one tool (use global `MISE_GHE_API_URL` instead when possible) |
