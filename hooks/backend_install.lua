@@ -21,6 +21,7 @@ function PLUGIN:BackendInstall(ctx)
     local token = ghe.token(options, api_url)
     local releases = ghe.list_releases(api_url, owner, repo, token)
     local release = ghe.find_release(releases, version)
+    local verify = ghe.verify_mode(options)
     local asset = ghe.pick_asset(release.assets, options)
     local filename = ghe.safe_filename(asset.name)
     if not filename then
@@ -32,6 +33,7 @@ function PLUGIN:BackendInstall(ctx)
 
     local archive_path = file.join_path(download_path, filename)
     ghe.download_asset(asset, archive_path, token, api_url)
+    ghe.verify_asset(archive_path, asset, release.assets, verify, download_path, token, api_url)
 
     ghe.install_asset(archive_path, install_path, options, repo)
 
