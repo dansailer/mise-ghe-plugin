@@ -1,0 +1,57 @@
+name: Bug report
+description: Something does not install, list or authenticate as expected
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Redact tokens** from everything you paste. For security problems, use [private reporting](https://github.com/dansailer/mise-ghe-plugin/security/advisories/new) instead.
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: The command you ran, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: input
+    id: tool
+    attributes:
+      label: Tool and version
+      placeholder: ghe:org/repo@1.2.3
+    validations:
+      required: true
+  - type: textarea
+    id: assets
+    attributes:
+      label: Release asset names
+      description: The asset file names of that release (no URLs to private hosts needed).
+  - type: input
+    id: mise
+    attributes:
+      label: mise version
+      description: Output of `mise --version`
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: OS and architecture
+      placeholder: macOS 15 arm64
+    validations:
+      required: true
+  - type: input
+    id: server
+    attributes:
+      label: GitHub server
+      placeholder: GHES 3.15, ghe.com, or github.com
+  - type: input
+    id: plugin
+    attributes:
+      label: Plugin version or commit
+      description: Output of `mise plugins ls --urls` for ghe
+  - type: textarea
+    id: debug
+    attributes:
+      label: Debug output
+      description: Run the command with `MISE_DEBUG=1` and paste the relevant part. Redact tokens and private host names if needed.
+      render: text

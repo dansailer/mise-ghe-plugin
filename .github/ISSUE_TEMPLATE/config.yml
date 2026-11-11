@@ -1,0 +1,8 @@
+blank_issues_enabled: true
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/dansailer/mise-ghe-plugin/security/advisories/new
+    about: Please report security problems privately.
+  - name: mise documentation
+    url: https://mise.jdx.dev
+    about: Questions about mise itself.

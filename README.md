@@ -4,6 +4,14 @@ A [mise](https://mise.jdx.dev) backend plugin that installs tools from **GitHub 
 
 Use `ghe:org/repo` to install internal tools from your GHE instance. For public GitHub tools, use mise's built-in `github:` backend instead.
 
+## Requirements
+
+- [mise](https://mise.jdx.dev) with backend plugin support. Tested with mise 2026.11; older versions are untested.
+- GitHub Enterprise Server (`https://<host>/api/v3`), GitHub Enterprise Cloud with data residency (`https://api.<subdomain>.ghe.com`) or github.com (`https://api.github.com`).
+- Linux, macOS or Windows on x86-64 or Arm64.
+- Optional: the [GitHub CLI](https://cli.github.com) (`gh`) for authentication.
+- External programs, only when an asset needs them: `tar` for `.tar`/`.tar.zst` archives; `gzip`, `xz`, `bzip2` or `zstd` for single compressed binaries; `chmod` to mark installed binaries executable (not on Windows).
+
 ---
 
 ## Install
@@ -13,11 +21,19 @@ Use `ghe:org/repo` to install internal tools from your GHE instance. For public 
 mise plugins install ghe "https://github.com/dansailer/mise-ghe-plugin"
 
 # 2. Set your GHE API URL
-mise config set --global env.MISE_GHE_API_URL "https://github.mycompany.com/api/v3"
+mise config set --global env.MISE_GHE_API_URL "https://ghe.example.com/api/v3"
 
 # 3. Authenticate
-gh auth login --hostname github.mycompany.com
+gh auth login --hostname ghe.example.com
 ```
+
+To pin the plugin to a release instead of the default branch, append the tag. The same URL works in `[plugins]`:
+
+```sh
+mise plugins install ghe "https://github.com/dansailer/mise-ghe-plugin#v0.1.0"
+```
+
+See the [releases](https://github.com/dansailer/mise-ghe-plugin/releases) for available tags.
 
 ---
 
@@ -34,9 +50,10 @@ github-cli = "latest"           # provides gh for authentication
 "ghe:myorg/mytool" = "1.2.3"   # add your tools here
 
 [env]
-MISE_GHE_API_URL = "https://github.mycompany.com/api/v3"
-GH_CONFIG_DIR    = "{{config_root}}/.config/gh"
+MISE_GHE_API_URL = "https://ghe.example.com/api/v3"
 ```
+
+For GitHub Enterprise Cloud with data residency, use `https://api.<subdomain>.ghe.com`. The plugin also accepts tokens and downloads for `<subdomain>.ghe.com`.
 
 For one internal GHE host, set `MISE_GHE_API_URL` once globally. Each tool only needs its `org/repo` and version — no per-tool API URL.
 
@@ -54,7 +71,7 @@ The plugin resolves credentials in this order. Each token is only sent to the ho
 
 | Priority | Source | Sent to |
 |----------|--------|---------|
-| 1 | Tool option `token` (avoid — do not store tokens in `mise.toml`) | that tool's `api_url` |
+| 1 | Tool option `token` (avoid: never commit a token in `mise.toml`) | that tool's `api_url` |
 | 2 | `MISE_GITHUB_ENTERPRISE_TOKEN`, then `MISE_GHE_TOKEN` | the host of `MISE_GHE_API_URL` / `GHE_API_URL`, and hosts listed in `MISE_GHE_TOKEN_HOSTS` |
 | 3 | `gh auth token` for the API hostname (recommended) | the host gh issued it for |
 | 4 | `MISE_GITHUB_TOKEN`, then `GITHUB_TOKEN`, then `GITHUB_API_TOKEN` | `github.com`, the GitHub Actions server (`GITHUB_SERVER_URL`, so a GHES runner's `GITHUB_TOKEN` works), or the GHE hosts from row 2 when `MISE_GHE_ALLOW_GITHUB_TOKEN=1` |
@@ -65,14 +82,14 @@ When a token variable is set but withheld from a host, mise prints a warning nam
 
 ```toml
 [env]
-MISE_GHE_API_URL     = "https://github.mycompany.com/api/v3"
-MISE_GHE_TOKEN_HOSTS = "github.other.com"   # comma-separated hostnames or URLs
+MISE_GHE_API_URL     = "https://ghe.example.com/api/v3"
+MISE_GHE_TOKEN_HOSTS = "ghe.other.example"   # comma-separated hostnames or URLs
 ```
 
 **Recommended:** use `gh auth login`. The plugin calls `gh auth token` automatically — no token env var needed.
 
 ```sh
-gh auth login --hostname github.mycompany.com
+gh auth login --hostname ghe.example.com
 # Requires: Contents: read (for private release assets)
 ```
 
@@ -101,7 +118,7 @@ GH_CONFIG_DIR = "/custom/path/to/gh-config"
 
 | Variable | When required | Purpose |
 |----------|--------------|---------|
-| `MISE_GHE_API_URL` | Always (unless `api_url` set per tool) | GHE API root, e.g. `https://github.mycompany.com/api/v3` |
+| `MISE_GHE_API_URL` | Always (unless `api_url` set per tool) | GHE API root, e.g. `https://ghe.example.com/api/v3` |
 | `GHE_API_URL` | — | Fallback if `MISE_GHE_API_URL` is unset |
 | `GH_CONFIG_DIR` | Non-standard gh setup | Directory containing `hosts.yml` |
 | `MISE_GITHUB_ENTERPRISE_TOKEN` | Private repos, no `gh` login | Preferred explicit token |
@@ -141,13 +158,13 @@ If one tool lives on a different GHE host, override `api_url` for that tool only
 ```toml
 [tools]
 "ghe:myorg/mytool"   = "1.2.3"
-"ghe:other/external" = { version = "latest", api_url = "https://github.other.com/api/v3" }
+"ghe:other/external" = { version = "latest", api_url = "https://ghe.other.example/api/v3" }
 ```
 
 The same override works inline:
 
 ```text
-ghe:org/repo[api_url=https://github.other.com/api/v3]@latest
+ghe:org/repo[api_url=https://ghe.other.example/api/v3]@latest
 ```
 
 All other tools continue to use the global `MISE_GHE_API_URL`.
@@ -167,6 +184,43 @@ If the choice is wrong, set `asset_pattern` (alias `matching`): only assets whos
 
 ---
 
+## Troubleshooting
+
+Run the command again with `MISE_DEBUG=1` to see the API URL, the chosen release and the chosen asset. Tokens are never logged, but check the output before you share it.
+
+| Symptom | Likely cause |
+|---------|--------------|
+| `404` for a repository that exists | GitHub answers 404 when the token cannot see a private repository. Check `gh auth status --hostname <host>` and that the token has Contents: read on the repository. |
+| `404` for every repository | `api_url` is missing the API path: GHES needs `https://<host>/api/v3`. |
+| `401` | The token is missing, invalid or expired, or it was withheld from that host (mise prints a warning; see [Authentication](#authentication)). |
+| `403` | The token lacks access (fine-grained token without the repository, or SAML SSO not authorized), or the API rate limit was hit. Anonymous requests have a much lower limit. |
+| `No matching release asset for this platform` | The release has no build for your OS/architecture, or names it unusually. Set `asset_pattern` (see [How the release asset is chosen](#how-the-release-asset-is-chosen)). |
+| `Unknown version` | The version does not match a release tag (`v` is optional) or name. `mise ls-remote ghe:org/repo` lists them. |
+| gh is not used | See [gh not found](#gh-not-found). |
+
+---
+
+## Security
+
+- Tokens are only sent over HTTPS, and only to the host they belong to (see [Authentication](#authentication)). Asset downloads are only accepted from the `api_url` host.
+- The tool option `token` ends up in `mise.toml`. Prefer `gh auth login` or an environment variable, and never commit a token.
+- Release assets are installed as published. Only install from repositories you trust.
+
+To report a vulnerability, see [SECURITY.md](SECURITY.md).
+
+---
+
+## Development
+
+```sh
+lua5.1 test/ghe_check.lua    # offline unit tests (Lua 5.1)
+luacheck .                   # lint, configured in .luacheckrc
+```
+
+CI runs both, plus an install smoke test with mise on Linux, macOS and Windows. See [CONTRIBUTING.md](CONTRIBUTING.md) for testing against a real GitHub Enterprise instance.
+
+---
+
 ## Uninstall
 
 ```sh
@@ -176,7 +230,6 @@ mise plugins uninstall --purge ghe
 
 # Remove the env vars from the global config
 mise unset --global MISE_GHE_API_URL
-mise unset --global GH_CONFIG_DIR
 
 # Remove the github-cli tool if it was added for this plugin
 mise unuse --global github-cli
@@ -188,4 +241,4 @@ The `[plugins]` entry (`ghe = "..."`) has no CLI removal command — delete that
 
 ## License
 
-MIT. Manual checks: [test/ghe_spec.md](test/ghe_spec.md).
+[MIT](LICENSE)
