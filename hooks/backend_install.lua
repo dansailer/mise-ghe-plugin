@@ -27,9 +27,6 @@ function PLUGIN:BackendInstall(ctx)
         error("Selected release asset has an unsafe name: " .. tostring(asset.name))
     end
 
-    ghe.ensure_dir(install_path)
-    ghe.ensure_dir(download_path)
-
     local archive_path = file.join_path(download_path, filename)
     ghe.download_asset(asset, archive_path, token, api_url)
 

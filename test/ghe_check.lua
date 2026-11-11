@@ -676,4 +676,93 @@ if not os.getenv("MISE_GHE_API_URL") and not os.getenv("GHE_API_URL") then
     end, "MISE_GHE_API_URL", "missing api_url")
 end
 
+do
+    -- host and port parsing
+    assert_eq(ghe.host_from_api_url("https://[::1]:8443/api/v3"), "[::1]", "IPv6 host")
+    assert_eq(ghe.host_from_api_url("https://GHE.Example:8443/api/v3"), "ghe.example", "host without port")
+    assert_eq(
+        ghe.same_http_host("https://ghe.example:8443/api/v3/x", "https://ghe.example/api/v3"),
+        false,
+        "different port is a different host"
+    )
+    assert_eq(
+        ghe.same_http_host("https://ghe.example:443/x", "https://ghe.example/api/v3"),
+        true,
+        "explicit default port"
+    )
+    assert_eq(
+        ghe.same_http_host("https://[::1]:8443/x", "https://[::1]:8443/api/v3"),
+        true,
+        "IPv6 same host and port"
+    )
+
+    -- api_url rejects userinfo only in the authority
+    local saved_getenv = os.getenv
+    os.getenv = function()
+        return nil
+    end
+    assert_eq(
+        ghe.api_url({ api_url = "https://ghe.example/api/v3/@scope" }),
+        "https://ghe.example/api/v3/@scope",
+        "@ in path allowed"
+    )
+    assert_err(function()
+        ghe.api_url({ api_url = "https://u:p@ghe.example/api/v3" })
+    end, "userinfo", "@ in authority rejected")
+    os.getenv = saved_getenv
+
+    -- distinct HTTP error messages
+    local url = "https://ghe.example/api/v3/repos/o/r/releases?per_page=100&page=1"
+    local limited = { ["x-ratelimit-remaining"] = "0", ["x-ratelimit-reset"] = "0" }
+    local m = ghe.http_error_message(url, 403, limited, "", false)
+    assert(m:find("rate limit exceeded", 1, true), "rate limit 403: " .. m)
+    assert(m:find("1970-01-01 00:00:00 UTC", 1, true), "rate limit reset time: " .. m)
+    assert(m:find("much lower limit", 1, true), "anonymous rate limit hint: " .. m)
+    m = ghe.http_error_message(url, 429, {}, "", true)
+    assert(m:find("rate limit exceeded", 1, true) and not m:find("much lower", 1, true), "429: " .. m)
+    m = ghe.http_error_message(url, 401, {}, "", true)
+    assert(m:find("authentication failed", 1, true), "401: " .. m)
+    m = ghe.http_error_message(url, 403, { ["x-ratelimit-remaining"] = "4999" }, "Resource not accessible", true)
+    assert(m:find("lacks access", 1, true) and m:find("Resource not accessible", 1, true), "403: " .. m)
+    assert(not m:find("rate limit", 1, true), "403 with quota left is not rate limiting")
+    m = ghe.http_error_message(url, 404, {}, "", false)
+    assert(m:find("No token was sent", 1, true), "404 anonymous: " .. m)
+    assert(m:find("gh auth login --hostname ghe.example", 1, true), "404 login hint: " .. m)
+    m = ghe.http_error_message(url, 404, {}, "", true)
+    assert(m:find("gh auth status --hostname ghe.example", 1, true), "404 private repo hint: " .. m)
+    assert(not m:find("did you mean", 1, true), "404 with /api/v3 has no api path hint")
+    m = ghe.http_error_message("https://ghe.example/repos/o/r/releases?page=1", 404, {}, "", true)
+    assert(m:find("did you mean https://ghe.example/api/v3?", 1, true), "404 missing /api/v3: " .. m)
+    m = ghe.http_error_message("https://api.github.com/repos/o/r/releases", 404, {}, "", true)
+    assert(not m:find("did you mean", 1, true), "api.github.com needs no /api/v3")
+    m = ghe.http_error_message(url, 502, {}, "bad gateway", true)
+    assert(m:find("502", 1, true) and m:find("bad gateway", 1, true), "other status: " .. m)
+
+    -- get_json reports through http_error_message and never logs the token
+    local saved_http, saved_log, saved_json = package.loaded.http, package.loaded.log, package.loaded.json
+    package.loaded.json = { decode = function() end }
+    local logged = {}
+    package.loaded.log = {
+        debug = function(msg)
+            table.insert(logged, msg)
+        end,
+    }
+    package.loaded.http = {
+        get = function()
+            return { status_code = 404, body = "", headers = {} }
+        end,
+    }
+    assert_err(function()
+        ghe.get_json(url, "s3cr3t-token")
+    end, "make sure your token can read it", "get_json 404 with token")
+    package.loaded.http = saved_http
+    assert(#logged > 0, "get_json logs the request")
+    for _, line in ipairs(logged) do
+        assert(not line:find("s3cr3t", 1, true), "token must not be logged: " .. line)
+    end
+    package.loaded.log = saved_log
+    package.loaded.json = saved_json
+    assert_eq(ghe.ensure_dir, nil, "ensure_dir removed")
+end
+
 print("ghe_check: ok")
