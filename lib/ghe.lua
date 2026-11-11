@@ -395,13 +395,105 @@ function M.token_from_gh(api_url)
     return nil
 end
 
+local GHE_TOKEN_VARS = { "MISE_GITHUB_ENTERPRISE_TOKEN", "MISE_GHE_TOKEN" }
+local GENERIC_TOKEN_VARS = { "MISE_GITHUB_TOKEN", "GITHUB_TOKEN", "GITHUB_API_TOKEN" }
+
+-- Add a URL's or bare hostname's accepted hosts (see gh_hosts_for_api_url) to a set.
+local function add_hosts(set, value)
+    value = nonempty(value)
+    if not value then
+        return
+    end
+    if not value:find("://", 1, true) then
+        value = "https://" .. value
+    end
+    for _, host in ipairs(M.gh_hosts_for_api_url(value)) do
+        set[host] = true
+    end
+end
+
+-- Add every host from a comma- or space-separated environment variable.
+local function add_hosts_from_list(set, name)
+    for entry in (os.getenv(name) or ""):gmatch("[^,%s]+") do
+        add_hosts(set, entry)
+    end
+end
+
+--- Hosts that GHE token variables may be sent to: the host of the
+-- environment's MISE_GHE_API_URL/GHE_API_URL plus MISE_GHE_TOKEN_HOSTS.
+function M.ghe_token_hosts()
+    local set = {}
+    add_hosts(set, os.getenv("MISE_GHE_API_URL"))
+    add_hosts(set, os.getenv("GHE_API_URL"))
+    add_hosts_from_list(set, "MISE_GHE_TOKEN_HOSTS")
+    return set
+end
+
+--- Hosts that generic GitHub token variables (GITHUB_TOKEN, ...) may be sent
+-- to: github.com, the GitHub Actions server the token was issued by
+-- (GITHUB_SERVER_URL/GITHUB_API_URL, which is the GHES host on GHES runners),
+-- and, when MISE_GHE_ALLOW_GITHUB_TOKEN=1, the GHE token hosts.
+function M.generic_token_hosts()
+    local set = { ["github.com"] = true, ["api.github.com"] = true }
+    add_hosts(set, os.getenv("GITHUB_SERVER_URL"))
+    add_hosts(set, os.getenv("GITHUB_API_URL"))
+    if nonempty(os.getenv("MISE_GHE_ALLOW_GITHUB_TOKEN")) == "1" then
+        for host in pairs(M.ghe_token_hosts()) do
+            set[host] = true
+        end
+    end
+    return set
+end
+
+-- Tell the user why a configured token variable was not used for this host.
+local function warn_token_withheld(names, host, hint)
+    for _, name in ipairs(names) do
+        if nonempty(os.getenv(name)) then
+            local ok, log = pcall(require, "log")
+            if ok and type(log) == "table" and log.warn then
+                log.warn(name .. " is set but not sent to " .. tostring(host) .. ": " .. hint)
+            end
+            return
+        end
+    end
+end
+
 --- Resolve credentials in the documented precedence order.
--- Tool options and GHE-specific variables win before gh and generic tokens.
+-- Environment tokens are bound to hosts: a GHE token is only sent to the
+-- configured GHE host(s) and a generic GitHub token only to github.com or an
+-- explicitly allowed host. gh returns host-scoped tokens on its own.
 function M.token(options, api_url)
-    return option_string(options, "token")
-        or env_first({ "MISE_GITHUB_ENTERPRISE_TOKEN", "MISE_GHE_TOKEN" })
-        or M.token_from_gh(api_url)
-        or env_first({ "MISE_GITHUB_TOKEN", "GITHUB_TOKEN", "GITHUB_API_TOKEN" })
+    local explicit = option_string(options, "token")
+    if explicit then
+        return explicit
+    end
+    local host = M.host_from_api_url(api_url)
+    if host and M.ghe_token_hosts()[host] then
+        local token = env_first(GHE_TOKEN_VARS)
+        if token then
+            return token
+        end
+    elseif host then
+        warn_token_withheld(
+            GHE_TOKEN_VARS,
+            host,
+            "it is not the MISE_GHE_API_URL host; add it to MISE_GHE_TOKEN_HOSTS to allow it"
+        )
+    end
+    local from_gh = M.token_from_gh(api_url)
+    if from_gh then
+        return from_gh
+    end
+    if host and M.generic_token_hosts()[host] then
+        return env_first(GENERIC_TOKEN_VARS)
+    elseif host then
+        warn_token_withheld(
+            GENERIC_TOKEN_VARS,
+            host,
+            "generic GitHub tokens are only sent to github.com unless MISE_GHE_ALLOW_GITHUB_TOKEN=1"
+        )
+    end
+    return nil
 end
 
 --- Normalize a backend tool name and return its owner and repository.
@@ -454,9 +546,11 @@ function M.get_json(url, token)
         error(
             "GitHub Enterprise API returned "
                 .. tostring(status)
-                .. " (unauthorized/forbidden). Set MISE_GITHUB_ENTERPRISE_TOKEN, MISE_GHE_TOKEN, or GITHUB_TOKEN with Contents: read for private release assets, or authenticate with gh ("
+                .. " (unauthorized/forbidden). Authenticate with gh ("
                 .. gh_hint
-                .. ")."
+                .. "), or set MISE_GITHUB_ENTERPRISE_TOKEN or MISE_GHE_TOKEN (Contents: read)."
+                .. " Environment tokens are only sent to the MISE_GHE_API_URL host or hosts in MISE_GHE_TOKEN_HOSTS"
+                .. " (see the README)."
         )
     end
     if status == 404 then

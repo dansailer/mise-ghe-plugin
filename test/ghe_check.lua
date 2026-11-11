@@ -172,6 +172,126 @@ package.loaded.file = prev_file
 os.getenv = prev_getenv
 RUNTIME = prev_runtime
 
+-- Host-bound environment tokens (#7). gh is unavailable here, so only
+-- environment variables can supply a token.
+local function token_with_env(env, options, api_url)
+    local saved_getenv, saved_cmd, saved_log = os.getenv, package.loaded.cmd, package.loaded.log
+    local warnings = {}
+    os.getenv = function(name) -- luacheck: ignore 122
+        return env[name]
+    end
+    package.loaded.cmd = {
+        exec = function()
+            error("gh not installed")
+        end,
+    }
+    package.loaded.log = {
+        warn = function(msg)
+            table.insert(warnings, msg)
+        end,
+    }
+    local ok, res = pcall(ghe.token, options or {}, api_url)
+    os.getenv = saved_getenv -- luacheck: ignore 122
+    package.loaded.cmd, package.loaded.log = saved_cmd, saved_log
+    if not ok then
+        error(res, 0)
+    end
+    return res, warnings
+end
+
+local A_URL = "https://ghe.a.example/api/v3"
+local B_URL = "https://ghe.b.example/api/v3"
+local env_a = { MISE_GHE_API_URL = A_URL, MISE_GHE_TOKEN = "tok-a" }
+assert_eq(token_with_env(env_a, {}, A_URL), "tok-a", "GHE token sent to configured host")
+local withheld, warnings = token_with_env(env_a, {}, B_URL)
+assert_eq(withheld, nil, "GHE token not sent to another api_url host")
+assert_eq(#warnings, 1, "withheld token is reported")
+assert_eq(warnings[1]:find("tok-a", 1, true), nil, "warning never contains the token")
+assert_eq(warnings[1]:find("MISE_GHE_TOKEN_HOSTS", 1, true) ~= nil, true, "warning explains the opt-in")
+assert_eq(
+    token_with_env({ GHE_API_URL = A_URL, MISE_GITHUB_ENTERPRISE_TOKEN = "tok-e" }, {}, A_URL),
+    "tok-e",
+    "GHE_API_URL also defines the token host"
+)
+assert_eq(
+    token_with_env({ MISE_GHE_TOKEN = "tok-a" }, {}, A_URL),
+    nil,
+    "no configured host: GHE token is not sent to a per-tool api_url"
+)
+assert_eq(
+    token_with_env(
+        {
+            MISE_GHE_API_URL = A_URL,
+            MISE_GHE_TOKEN = "tok-a",
+            MISE_GHE_TOKEN_HOSTS = "ghe.c.example, ghe.b.example",
+        },
+        {},
+        B_URL
+    ),
+    "tok-a",
+    "MISE_GHE_TOKEN_HOSTS allows another host"
+)
+assert_eq(
+    token_with_env({ MISE_GHE_TOKEN = "tok-a", MISE_GHE_TOKEN_HOSTS = B_URL }, {}, B_URL),
+    "tok-a",
+    "MISE_GHE_TOKEN_HOSTS accepts URLs"
+)
+assert_eq(
+    token_with_env(
+        { MISE_GHE_API_URL = "https://api.acme.ghe.com", MISE_GHE_TOKEN = "tok" },
+        {},
+        "https://acme.ghe.com/api/v3"
+    ),
+    "tok",
+    "api. host and its bare host are the same GHE host"
+)
+assert_eq(
+    token_with_env({ MISE_GHE_API_URL = A_URL, MISE_GHE_TOKEN = "tok-a" }, {}, "https://api.ghe.a.example/api/v3"),
+    nil,
+    "a subdomain of the configured host is not trusted"
+)
+assert_eq(token_with_env(env_a, { token = "opt" }, B_URL), "opt", "explicit token option still wins")
+
+-- Generic GitHub tokens.
+local env_generic = { MISE_GHE_API_URL = A_URL, GITHUB_TOKEN = "gh-generic" }
+local generic, generic_warnings = token_with_env(env_generic, {}, A_URL)
+assert_eq(generic, nil, "GITHUB_TOKEN not sent to a GHE host by default")
+assert_eq(#generic_warnings, 1, "withheld GITHUB_TOKEN is reported")
+assert_eq(
+    token_with_env({ GITHUB_TOKEN = "gh-generic" }, {}, "https://api.github.com"),
+    "gh-generic",
+    "GITHUB_TOKEN sent to api.github.com"
+)
+assert_eq(
+    token_with_env(
+        { MISE_GHE_API_URL = A_URL, GITHUB_TOKEN = "gh-generic", MISE_GHE_ALLOW_GITHUB_TOKEN = "1" },
+        {},
+        A_URL
+    ),
+    "gh-generic",
+    "MISE_GHE_ALLOW_GITHUB_TOKEN=1 allows GITHUB_TOKEN for the GHE host"
+)
+assert_eq(
+    token_with_env({ MISE_GHE_ALLOW_GITHUB_TOKEN = "1", GITHUB_TOKEN = "gh-generic" }, {}, B_URL),
+    nil,
+    "the opt-in only covers configured GHE hosts"
+)
+assert_eq(
+    token_with_env({ GITHUB_SERVER_URL = "https://ghe.a.example", GITHUB_TOKEN = "actions" }, {}, A_URL),
+    "actions",
+    "GitHub Actions on GHES: GITHUB_TOKEN belongs to GITHUB_SERVER_URL"
+)
+assert_eq(
+    token_with_env({ GITHUB_SERVER_URL = "https://github.com", GITHUB_TOKEN = "actions" }, {}, A_URL),
+    nil,
+    "github.com Actions token not sent to GHE"
+)
+assert_eq(
+    token_with_env({ MISE_GHE_API_URL = A_URL, MISE_GHE_TOKEN = "tok-a", GITHUB_TOKEN = "gh" }, {}, A_URL),
+    "tok-a",
+    "GHE token preferred over generic"
+)
+
 local h = ghe.headers(nil)
 assert_eq(h["User-Agent"], "mise-ghe-backend", "ua")
 assert_eq(h["Accept"], "application/vnd.github+json", "accept")
