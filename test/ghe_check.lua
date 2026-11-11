@@ -189,6 +189,184 @@ assert_eq(ghe.pick_asset({ linux_asset, musl_asset }, {}).name, "tool-linux-amd6
 assert_eq(ghe.pick_asset({ linux_asset, win_asset },  {}).name, "tool-linux-amd64.tar.gz", "prefer native OS")
 assert_eq(ghe.pick_asset({ linux_asset, sum_asset },  {}).name, "tool-linux-amd64.tar.gz", "prefer archive over checksum")
 
+-- Platform-aware asset selection (#4, #5). pick_asset reads RUNTIME on each call.
+local function names_to_assets(text)
+    local list = {}
+    for name in text:gmatch("%S+") do
+        list[#list + 1] = { name = name }
+    end
+    return list
+end
+
+local function pick_on(os_type, arch_type, assets, opts)
+    local saved = RUNTIME
+    RUNTIME = { osType = os_type, archType = arch_type }
+    local ok, res = pcall(ghe.pick_asset, assets, opts or {})
+    RUNTIME = saved
+    if not ok then
+        error(res, 0)
+    end
+    return res.name
+end
+
+local RIPGREP = names_to_assets([[
+ripgrep-14.1.1-aarch64-apple-darwin.tar.gz ripgrep-14.1.1-aarch64-apple-darwin.tar.gz.sha256
+ripgrep-14.1.1-aarch64-unknown-linux-gnu.tar.gz ripgrep-14.1.1-aarch64-unknown-linux-gnu.tar.gz.sha256
+ripgrep-14.1.1-armv7-unknown-linux-gnueabihf.tar.gz ripgrep-14.1.1-armv7-unknown-linux-musleabi.tar.gz
+ripgrep-14.1.1-i686-pc-windows-msvc.zip ripgrep-14.1.1-i686-unknown-linux-gnu.tar.gz
+ripgrep-14.1.1-powerpc64-unknown-linux-gnu.tar.gz ripgrep-14.1.1-s390x-unknown-linux-gnu.tar.gz
+ripgrep-14.1.1-x86_64-apple-darwin.tar.gz ripgrep-14.1.1-x86_64-pc-windows-gnu.zip
+ripgrep-14.1.1-x86_64-pc-windows-msvc.zip ripgrep-14.1.1-x86_64-unknown-linux-musl.tar.gz
+ripgrep-14.1.1-x86_64-unknown-linux-musl.tar.gz.sha256 ripgrep_14.1.1-1_amd64.deb ripgrep_14.1.1-1_amd64.deb.sha256
+]])
+local GH = names_to_assets([[
+gh_2.63.0_checksums.txt gh_2.63.0_linux_386.deb gh_2.63.0_linux_386.rpm gh_2.63.0_linux_386.tar.gz
+gh_2.63.0_linux_amd64.deb gh_2.63.0_linux_amd64.rpm gh_2.63.0_linux_amd64.tar.gz gh_2.63.0_linux_arm64.deb
+gh_2.63.0_linux_arm64.rpm gh_2.63.0_linux_arm64.tar.gz gh_2.63.0_linux_armv6.deb gh_2.63.0_linux_armv6.rpm
+gh_2.63.0_linux_armv6.tar.gz gh_2.63.0_macOS_amd64.zip gh_2.63.0_macOS_arm64.zip gh_2.63.0_macOS_universal.pkg
+gh_2.63.0_windows_386.msi gh_2.63.0_windows_386.zip gh_2.63.0_windows_amd64.msi gh_2.63.0_windows_amd64.zip
+gh_2.63.0_windows_arm64.zip
+]])
+local JQ = names_to_assets([[
+jq-1.7.1.tar.gz jq-1.7.1.zip jq-linux-amd64 jq-linux-arm64 jq-linux-armel jq-linux-armhf jq-linux-i386
+jq-linux-mips jq-linux-mips64 jq-linux-mips64el jq-linux-mips64r6 jq-linux-mips64r6el jq-linux-mipsel
+jq-linux-mipsr6 jq-linux-mipsr6el jq-linux-powerpc jq-linux-ppc64el jq-linux-riscv64 jq-linux-s390x jq-linux64
+jq-macos-amd64 jq-macos-arm64 jq-osx-amd64 jq-win64.exe jq-windows-amd64.exe jq-windows-i386.exe sha256sum.txt
+]])
+local FZF = names_to_assets([[
+fzf-0.56.3-darwin_amd64.tar.gz fzf-0.56.3-darwin_arm64.tar.gz fzf-0.56.3-freebsd_amd64.tar.gz
+fzf-0.56.3-linux_amd64.tar.gz fzf-0.56.3-linux_arm64.tar.gz fzf-0.56.3-linux_armv5.tar.gz
+fzf-0.56.3-linux_armv6.tar.gz fzf-0.56.3-linux_armv7.tar.gz fzf-0.56.3-linux_loong64.tar.gz
+fzf-0.56.3-linux_ppc64le.tar.gz fzf-0.56.3-linux_s390x.tar.gz fzf-0.56.3-openbsd_amd64.tar.gz
+fzf-0.56.3-windows_amd64.zip fzf-0.56.3-windows_arm64.zip fzf-0.56.3-windows_armv5.zip
+fzf-0.56.3-windows_armv6.zip fzf-0.56.3-windows_armv7.zip fzf_0.56.3_checksums.txt
+]])
+
+-- { assets, os, arch, expected asset (or false for "no match") }
+local PLATFORM_CASES = {
+    { RIPGREP, "linux", "amd64", "ripgrep-14.1.1-x86_64-unknown-linux-musl.tar.gz" },
+    { RIPGREP, "linux", "arm64", "ripgrep-14.1.1-aarch64-unknown-linux-gnu.tar.gz" },
+    { RIPGREP, "linux", "386", "ripgrep-14.1.1-i686-unknown-linux-gnu.tar.gz" },
+    { RIPGREP, "darwin", "arm64", "ripgrep-14.1.1-aarch64-apple-darwin.tar.gz" },
+    { RIPGREP, "darwin", "amd64", "ripgrep-14.1.1-x86_64-apple-darwin.tar.gz" },
+    { RIPGREP, "windows", "amd64", "ripgrep-14.1.1-x86_64-pc-windows-msvc.zip" },
+    { RIPGREP, "windows", "arm64", "ripgrep-14.1.1-x86_64-pc-windows-msvc.zip" },
+    { GH, "linux", "amd64", "gh_2.63.0_linux_amd64.tar.gz" },
+    { GH, "linux", "arm64", "gh_2.63.0_linux_arm64.tar.gz" },
+    { GH, "linux", "386", "gh_2.63.0_linux_386.tar.gz" },
+    { GH, "darwin", "arm64", "gh_2.63.0_macOS_arm64.zip" },
+    { GH, "darwin", "amd64", "gh_2.63.0_macOS_amd64.zip" },
+    { GH, "windows", "amd64", "gh_2.63.0_windows_amd64.zip" },
+    { GH, "windows", "arm64", "gh_2.63.0_windows_arm64.zip" },
+    { JQ, "linux", "amd64", "jq-linux-amd64" },
+    { JQ, "linux", "arm64", "jq-linux-arm64" },
+    { JQ, "linux", "386", "jq-linux-i386" },
+    { JQ, "darwin", "arm64", "jq-macos-arm64" },
+    { JQ, "darwin", "amd64", "jq-macos-amd64" },
+    { JQ, "windows", "amd64", "jq-win64.exe" },
+    { FZF, "linux", "amd64", "fzf-0.56.3-linux_amd64.tar.gz" },
+    { FZF, "linux", "arm64", "fzf-0.56.3-linux_arm64.tar.gz" },
+    { FZF, "linux", "386", false },
+    { FZF, "darwin", "arm64", "fzf-0.56.3-darwin_arm64.tar.gz" },
+    { FZF, "darwin", "amd64", "fzf-0.56.3-darwin_amd64.tar.gz" },
+    { FZF, "windows", "amd64", "fzf-0.56.3-windows_amd64.zip" },
+    { FZF, "windows", "arm64", "fzf-0.56.3-windows_arm64.zip" },
+}
+for i, case in ipairs(PLATFORM_CASES) do
+    local label = "platform case " .. i .. " (" .. case[2] .. "/" .. case[3] .. ")"
+    if case[4] then
+        assert_eq(pick_on(case[2], case[3], case[1]), case[4], label)
+    else
+        assert_err(function()
+            pick_on(case[2], case[3], case[1])
+        end, "No matching release asset", label)
+    end
+end
+
+-- #4: "win" must not match inside "darwin".
+assert_eq(ghe.name_tokens("tool-darwin-arm64.tar.gz").win, nil, "no win token in darwin")
+assert_eq(pick_on("darwin", "arm64", names_to_assets("tool-darwin-arm64.tar.gz")), "tool-darwin-arm64.tar.gz", "darwin")
+assert_eq(
+    pick_on("darwin", "amd64", names_to_assets("tool_Darwin_x86_64.tar.gz")),
+    "tool_Darwin_x86_64.tar.gz",
+    "Darwin x86_64"
+)
+assert_eq(
+    pick_on("windows", "amd64", names_to_assets("tool-darwin-amd64.tar.gz tool-win64.zip")),
+    "tool-win64.zip",
+    "win64 on windows"
+)
+for _, os_type in ipairs({ "linux", "darwin" }) do
+    assert_err(function()
+        pick_on(os_type, "amd64", names_to_assets("tool-x86_64-pc-windows-msvc.zip tool-win64.zip"))
+    end, "No matching release asset", "windows assets rejected on " .. os_type)
+end
+
+-- #5: wrong architecture is rejected rather than installed silently.
+assert_err(function()
+    pick_on("linux", "amd64", names_to_assets("tool-linux-arm64.tar.gz"))
+end, "tool-linux-arm64.tar.gz", "foreign arch rejected, assets listed")
+assert_err(function()
+    pick_on("linux", "386", names_to_assets("tool-linux-x86_64.tar.gz"))
+end, "No matching release asset", "x86_64 is not 386")
+assert_eq(
+    pick_on("linux", "amd64", names_to_assets("tool-linux-arm64.tar.gz"), { asset_pattern = "arm64" }),
+    "tool-linux-arm64.tar.gz",
+    "explicit pattern still allows a foreign arch"
+)
+-- Emulation and universal binaries.
+assert_eq(
+    pick_on("darwin", "arm64", names_to_assets("tool-darwin-amd64.tar.gz")),
+    "tool-darwin-amd64.tar.gz",
+    "Rosetta fallback"
+)
+assert_eq(
+    pick_on("darwin", "arm64", names_to_assets("tool-darwin-amd64.tar.gz tool-darwin-universal.tar.gz")),
+    "tool-darwin-universal.tar.gz",
+    "universal beats emulation"
+)
+assert_eq(pick_on("darwin", "amd64", names_to_assets("tool_darwin_all.tar.gz")), "tool_darwin_all.tar.gz", "darwin_all")
+-- OS packages are never auto-selected, and a pattern selecting only packages explains why.
+for _, pkg in ipairs({
+    "tool-linux-amd64.deb",
+    "tool-linux-amd64.rpm",
+    "tool-windows-amd64.msi",
+    "tool-darwin-arm64.dmg",
+}) do
+    local os_type = pkg:match("%-(%a+)%-")
+    local arch = pkg:match("%-(%w+)%.%a+$")
+    assert_err(function()
+        pick_on(os_type, arch, names_to_assets(pkg))
+    end, "OS packages", "package not selected: " .. pkg)
+end
+assert_err(function()
+    pick_on("linux", "amd64", names_to_assets("tool-linux-amd64.deb"), { asset_pattern = ".deb" })
+end, "OS packages", "pattern selecting a package errors")
+assert_eq(
+    pick_on("linux", "amd64", names_to_assets("tool_1.0_amd64.deb tool-linux-amd64.tar.gz")),
+    "tool-linux-amd64.tar.gz",
+    "archive over deb"
+)
+-- Sidecars are never selected.
+for _, sidecar in ipairs({
+    "tool-linux-amd64.tar.gz.sha512",
+    "tool-linux-amd64.tar.gz.intoto.jsonl",
+    "tool-linux-amd64.tar.gz.pem",
+    "tool-linux-amd64.sbom.json",
+    "checksums.txt",
+    "SHA256SUMS",
+}) do
+    assert_err(function()
+        pick_on("linux", "amd64", { { name = sidecar } })
+    end, "No matching release asset", "sidecar skipped: " .. sidecar)
+end
+-- "test" penalises the token, not substrings such as "latest".
+assert_eq(
+    pick_on("linux", "amd64", names_to_assets("tool-tests-linux-amd64.tar.gz tool-latest-linux-amd64.tar.gz")),
+    "tool-latest-linux-amd64.tar.gz",
+    "latest is not penalised"
+)
+
 assert_eq(ghe.is_archive("a.tar.gz"), true, "tar.gz")
 assert_eq(ghe.is_archive("a.tgz"), true, "tgz")
 assert_eq(ghe.is_archive("a.zip"), true, "zip")
