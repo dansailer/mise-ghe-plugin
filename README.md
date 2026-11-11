@@ -80,13 +80,9 @@ gh auth login --hostname github.mycompany.com
 
 ### gh not found
 
-The plugin runs in a sanitized environment — your shell's `PATH` and `HOME` are not automatically available. It recovers them from standard locations based on the plugin directory, checking:
+If `github-cli` is in your mise config (as in [Setup](#setup)), the plugin declares it as a dependency: mise installs it first and puts its real `gh` binary on `PATH` for the plugin. Otherwise the plugin uses the `gh` on your `PATH`. mise's shims are never used, because they re-enter mise.
 
-| Platform | Config location |
-|----------|----------------|
-| Unix | `~/.config/gh/hosts.yml` |
-| macOS | `~/Library/Application Support/gh/hosts.yml` |
-| Windows | `%APPDATA%\GitHub CLI\hosts.yml` |
+gh finds its own login in its standard config directory (`$XDG_CONFIG_HOME/gh` or `~/.config/gh` on Linux and macOS, `%APPDATA%\GitHub CLI` on Windows). Only if the hook environment has none of `HOME`, `USERPROFILE`, `XDG_CONFIG_HOME` or `APPDATA` does the plugin look for those directories above the mise data directory. `gh auth token` is given 15 seconds.
 
 If your `gh` config is elsewhere, set `GH_CONFIG_DIR` in your global mise config:
 
