@@ -719,6 +719,30 @@ assert_err(function()
     ghe.bin_name({ bin = ".." }, "repo")
 end, "Invalid binary name", "reject .. bin")
 
+-- Windows needs an executable extension (#9).
+local function bin_name_on(os_type, ...)
+    local saved = RUNTIME
+    RUNTIME = { osType = os_type, archType = "amd64" }
+    local ok, res = pcall(ghe.bin_name, ...)
+    RUNTIME = saved
+    if not ok then
+        error(res, 0)
+    end
+    return res
+end
+assert_eq(bin_name_on("windows", {}, "jq", "jq-windows-amd64.exe"), "jq.exe", "windows adds .exe")
+assert_eq(bin_name_on("windows", {}, "jq"), "jq.exe", "windows defaults to .exe")
+assert_eq(bin_name_on("windows", { bin = "jq.exe" }, "repo", "jq.exe"), "jq.exe", "no double .exe")
+assert_eq(bin_name_on("windows", { bin = "JQ.EXE" }, "repo"), "JQ.EXE", "existing extension in any case")
+assert_eq(bin_name_on("windows", { bin = "tool" }, "repo", "tool-windows.cmd"), "tool.cmd", "keeps .cmd runnable")
+assert_eq(bin_name_on("linux", {}, "jq", "jq-linux-amd64"), "jq", "no extension on linux")
+assert_eq(bin_name_on("darwin", {}, "jq", "jq.exe"), "jq", "no extension on macOS")
+calls = with_install_stubs("windows", nil, function()
+    ghe.install_asset("/dl/jq-windows-amd64.exe", "/inst", {}, "jq")
+end)
+assert_eq(calls[1], "move /dl/jq-windows-amd64.exe -> /inst/jq.exe", "windows raw .exe keeps its extension")
+assert_eq(#calls, 1, "no chmod on windows")
+
 if not os.getenv("MISE_GHE_API_URL") and not os.getenv("GHE_API_URL") then
     assert_err(function()
         ghe.api_url({})
