@@ -151,7 +151,22 @@ package.loaded.cmd = {
 }
 assert_eq(ghe.token_from_gh("https://ghe.example/api/v3"), "ghp_from_gh", "gh token with mise env")
 assert_eq(seen_gh_env.GH_CONFIG_DIR, "/home/test/.config/gh", "gh config dir")
-assert_eq(seen_gh_env.PATH:sub(1, #"/home/test/.local/share/mise/shims"), "/home/test/.local/share/mise/shims", "mise shims path")
+assert_eq(seen_gh_env.PATH, "/usr/bin:/home/test/.local/share/mise/shims", "mise shims appended after PATH")
+assert_eq(seen_gh_env.MISE_GHE_IN_GH_LOOKUP, "1", "recursion guard set for gh")
+
+-- Nested invocation (gh shim re-entering mise -> this plugin) must not run gh.
+os.getenv = function(name)
+    if name == "MISE_GHE_IN_GH_LOOKUP" then
+        return "1"
+    end
+    return nil
+end
+package.loaded.cmd = {
+    exec = function()
+        error("gh must not run inside a nested gh token lookup")
+    end,
+}
+assert_eq(ghe.token_from_gh("https://ghe.example/api/v3"), nil, "recursion guard skips gh")
 package.loaded.cmd = prev_cmd
 package.loaded.file = prev_file
 os.getenv = prev_getenv
