@@ -119,7 +119,7 @@ package.loaded.cmd = prev_cmd
 local prev_runtime = RUNTIME
 local prev_file = package.loaded.file
 local prev_getenv = os.getenv
-local seen_gh_env
+local seen_gh_env, seen_gh_opts
 RUNTIME = {
     osType = "linux",
     archType = "amd64",
@@ -150,13 +150,54 @@ package.loaded.cmd = {
             error("unexpected command: " .. tostring(command))
         end
         seen_gh_env = opts.env
+        seen_gh_opts = opts
         return "ghp_from_gh"
     end,
 }
 assert_eq(ghe.token_from_gh("https://ghe.example/api/v3"), "ghp_from_gh", "gh token with mise env")
 assert_eq(seen_gh_env.GH_CONFIG_DIR, "/home/test/.config/gh", "gh config dir")
-assert_eq(seen_gh_env.PATH, "/usr/bin:/home/test/.local/share/mise/shims", "mise shims appended after PATH")
+-- #10: mise removes its shims from the hook PATH on purpose; the plugin must not
+-- add them back (a mise-managed gh comes from PLUGIN.depends instead).
+assert_eq(seen_gh_env.PATH, "/usr/bin", "mise shims are not added to PATH")
 assert_eq(seen_gh_env.MISE_GHE_IN_GH_LOOKUP, "1", "recursion guard set for gh")
+assert_eq(seen_gh_opts.timeout, 15, "gh auth token has a timeout")
+
+-- #10: GH_CONFIG_DIR is only discovered when gh has no home to resolve it from.
+os.getenv = function(name)
+    if name == "PATH" then
+        return "/usr/bin"
+    end
+    if name == "HOME" then
+        return "/home/test"
+    end
+    return nil
+end
+assert_eq(ghe.token_from_gh("https://ghe.example/api/v3"), "ghp_from_gh", "gh token with HOME")
+assert_eq(seen_gh_env.GH_CONFIG_DIR, nil, "GH_CONFIG_DIR left to gh when HOME is set")
+assert_eq(seen_gh_env.HOME, "/home/test", "HOME passed through")
+os.getenv = function(name)
+    if name == "GH_CONFIG_DIR" then
+        return "/custom/gh"
+    end
+    return nil
+end
+ghe.token_from_gh("https://ghe.example/api/v3")
+assert_eq(seen_gh_env.GH_CONFIG_DIR, "/custom/gh", "explicit GH_CONFIG_DIR wins")
+
+-- #10: the walk neither reports macOS' Library path nor reaches the filesystem root.
+os.getenv = function()
+    return nil
+end
+local probed = {}
+package.loaded.file.exists = function(path)
+    table.insert(probed, path)
+    return path == "/.config/gh/hosts.yml" or path == "/home/test/Library/Application Support/gh/hosts.yml"
+end
+ghe.token_from_gh("https://ghe.example/api/v3")
+assert_eq(seen_gh_env.GH_CONFIG_DIR, nil, "root and Library locations are not used")
+for _, path in ipairs(probed) do
+    assert_eq(path:find("Library", 1, true), nil, "Library path not probed")
+end
 
 -- Nested invocation (gh shim re-entering mise -> this plugin) must not run gh.
 os.getenv = function(name)

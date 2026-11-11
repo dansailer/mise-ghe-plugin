@@ -219,50 +219,38 @@ local function parent_dir(path)
     return parent
 end
 
--- Find a standard gh configuration directory when mise omitted HOME from the
--- hook environment. pluginDirPath is <MISE_DATA_DIR>/plugins/ghe; two hops up
--- reach <MISE_DATA_DIR>, and one more reaches the home directory where all
--- standard gh config locations live.
+-- Find a standard gh configuration directory, only for hook environments in
+-- which gh could not find its own: none of HOME, USERPROFILE, XDG_CONFIG_HOME
+-- or APPDATA is set. pluginDirPath is <MISE_DATA_DIR>/plugins/ghe and
+-- MISE_DATA_DIR usually lives below the home directory, so the ancestors of the
+-- plugin directory are searched for gh's standard locations
+-- (<home>/.config/gh on Linux and macOS, %APPDATA%\GitHub CLI on Windows).
+-- The walk stops below the filesystem root so it never picks up /.config/gh.
 local function gh_config_dir_from_plugin_path()
+    for _, name in ipairs({ "HOME", "USERPROFILE", "XDG_CONFIG_HOME", "APPDATA" }) do
+        if nonempty(os.getenv(name)) then
+            return nil
+        end
+    end
     local path = plugin_dir_path()
-    if not path then return nil end
+    if not path then
+        return nil
+    end
     local file = require("file")
-
-    -- Walk up a few ancestors looking for standard gh config locations.
-    -- This avoids assuming a fixed relationship between <MISE_DATA_DIR> and $HOME.
     local current = path
     for _ = 1, 8 do
         current = parent_dir(current)
-        if not current then
+        if not current or not parent_dir(current) then
             return nil
         end
         for _, candidate in ipairs({
             file.join_path(current, ".config", "gh"),
             file.join_path(current, "AppData", "Roaming", "GitHub CLI"),
-            file.join_path(current, "Library", "Application Support", "gh"),
         }) do
             if file.exists(file.join_path(candidate, "hosts.yml")) then
                 return candidate
             end
         end
-    end
-    return nil
-end
-
--- Find mise's gh shim so a globally installed github-cli can be used by a hook.
--- pluginDirPath is <MISE_DATA_DIR>/plugins/ghe; two hops up reach <MISE_DATA_DIR>.
-local function mise_shims_from_plugin_path()
-    local path = plugin_dir_path()
-    if not path then return nil end
-    local file = require("file")
-
-    -- plugins/ghe -> plugins -> <MISE_DATA_DIR>
-    path = parent_dir(parent_dir(path))
-    if not path then return nil end
-
-    local shims = file.join_path(path, "shims")
-    if file.exists(file.join_path(shims, "gh")) then
-        return shims
     end
     return nil
 end
@@ -338,10 +326,13 @@ function M.same_http_host(url, api_url)
     return false
 end
 
--- Set while `gh auth token` runs. When gh resolves to mise's shim, the shim
--- re-enters mise, which may call this plugin again to resolve a not-yet-installed
--- ghe tool; that nested call must not invoke gh again or it recurses forever.
+-- Set while `gh auth token` runs. mise removes its shims from the hook PATH,
+-- and the plugin finds a mise-managed gh through PLUGIN.depends instead. If gh
+-- still resolves to a mise shim (e.g. a shims dir listed twice in PATH), the
+-- shim re-enters mise, which may call this plugin again; that nested call must
+-- not invoke gh again or it recurses forever.
 local GH_LOOKUP_GUARD = "MISE_GHE_IN_GH_LOOKUP"
+local GH_TIMEOUT_SECONDS = 15
 
 -- Ask gh for a token without interpolating the host into shell source.
 -- The explicit environment repairs the sanitized environment used by mise hooks.
@@ -356,8 +347,8 @@ local function gh_auth_token(host)
         GH_HOST = host,
         GH_PROMPT_DISABLED = "1",
         GIT_TERMINAL_PROMPT = "0",
-        -- Resolve GH_CONFIG_DIR once: prefer the environment value, fall back to
-        -- path discovery so the standard gh login works without any manual config.
+        -- Prefer the environment value; discovery only runs when gh would have no
+        -- home directory to find its own config in.
         GH_CONFIG_DIR = nonempty(os.getenv("GH_CONFIG_DIR")) or gh_config_dir_from_plugin_path(),
     }
     for _, name in ipairs({ "PATH", "HOME", "USERPROFILE", "XDG_CONFIG_HOME", "APPDATA", "LOCALAPPDATA" }) do
@@ -366,19 +357,8 @@ local function gh_auth_token(host)
             gh_env[name] = value
         end
     end
-    -- Backend hooks may not include mise-managed tool paths in PATH. Append the
-    -- shims dir as a last resort only: a real gh already on PATH must win, because
-    -- the gh shim is mise itself and re-enters this plugin.
-    local shims = mise_shims_from_plugin_path()
-    if shims then
-        local sep = is_windows() and ";" or ":"
-        if gh_env.PATH and gh_env.PATH ~= "" then
-            gh_env.PATH = gh_env.PATH .. sep .. shims
-        else
-            gh_env.PATH = shims
-        end
-    end
-    local ok, output = pcall(cmd.exec, "gh auth token", { env = gh_env })
+    -- A hanging gh (e.g. a credential helper waiting for input) must not block mise.
+    local ok, output = pcall(cmd.exec, "gh auth token", { env = gh_env, timeout = GH_TIMEOUT_SECONDS })
     if not ok then
         return nil
     end
