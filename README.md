@@ -140,6 +140,17 @@ All other tools continue to use the global `MISE_GHE_API_URL`.
 
 `ls-remote` lists non-draft versions oldest → newest and strips a leading `v` (`v1.2.3` → `1.2.3`).
 
+### How the release asset is chosen
+
+Asset names are split into tokens (`tool_2.0_linux_amd64.tar.gz` → `tool`, `2.0`, `linux`, `amd64`), and the plugin picks the best-scoring asset for the current platform:
+
+- Checksum and signature files (`.sha256`, `.sha512`, `.sig`, `.pem`, `.intoto.jsonl`, `checksums.txt`, `SHA256SUMS`, …) and OS packages (`.deb`, `.rpm`, `.msi`, `.pkg`, `.dmg`, …) are never installed.
+- Assets labelled for another OS or another architecture are rejected, so a missing build fails with the list of available assets instead of installing the wrong binary.
+- A native architecture beats a universal macOS binary (`universal`, `darwin_all`), which beats an emulated one: `amd64` on Apple Silicon (Rosetta 2) and `amd64`/`x86` on Windows on Arm.
+- Archives are preferred over bare binaries, `msvc` over `gnu` on Windows, and glibc over `musl` builds. Names with `debug`/`test` tokens score lower.
+
+If the choice is wrong, set `asset_pattern` (alias `matching`): only assets whose name contains that substring are considered, and they may be for another OS or architecture.
+
 ---
 
 ## Uninstall
